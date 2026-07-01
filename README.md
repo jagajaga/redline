@@ -73,15 +73,34 @@ q        quit
 Killing a background command targets just that pid; a `/loop` or subagent lives
 inside a session process and can only be stopped by killing the owning session.
 
+## The Governor (fuel gauge)
+
+Like a car's range estimate: keep flooring it and you hit the limit early;
+ease off and you coast to the reset. Two tanks, computed account-wide across
+every host:
+
+- **Plan window** — a 5h block anchored at your first activity (mirrors
+  Anthropic's session windows). Budget comes from config, or is **learned from
+  observed 429 rate-limits** (shown with a `~`).
+- **Cruise** — a self-set rolling hourly budget.
+
+Readouts: **cruise delta** (`▲2.1×` = burning 2.1× faster than the pace that
+reaches the reset; `▼0.6×` = coasting; `⛔` = tank empty) in the menu-bar title
+and TUI top bar; range-to-empty, tank %, and reset time in the dropdown; a
+**limit ahead** alert when the wall lands before the reset.
+
 ## Configuration
 
-Optional `~/.claude/ccwatch/config.toml` overrides leak thresholds (see
-`core/src/config.rs` for the keys and defaults), e.g.:
+Optional `~/.claude/ccwatch/config.toml` overrides leak thresholds and the
+governor (see `core/src/config.rs` for all keys), e.g.:
 
 ```toml
 burn_tokens_per_min = 40000
 runaway_no_user_secs = 300
-cache_bleed_ratio = 0.2
+window_hours = 5
+#window_budget = 200_000_000   # unset → learned from 429s
+hourly_budget = 3_000_000
+terminal = "iTerm"             # unset → auto-detect
 ```
 
 ## Token accounting
