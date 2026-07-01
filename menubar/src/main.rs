@@ -1,9 +1,11 @@
 //! `ccwatch-menubar` — Phase 3 macOS menu-bar client.
 //!
-//! It reuses the exact same daemon and IPC as the TUI: subscribe to snapshots,
-//! show a glanceable title (`⚡3 · 46k` or `⚠2` when leaks are present), and a
-//! dropdown listing per-host sessions. All presentation logic lives in
-//! [`summary`] and is unit-tested; this file is the thin GUI shell.
+//! Same daemon and IPC as the TUI. The menu-bar icon is a live load graph
+//! (rendered 2× for Retina; see [`graph`]), the title next to it is the current
+//! burn rate (or `⚠N` when leaks are detected), and the dropdown lists alerts
+//! and per-session submenus with pause / resume / kill actions (destructive
+//! ones confirmed via a native dialog). Reconnects automatically if the daemon
+//! dies.
 //!
 //! `ccwatch-menubar --dump` prints the title/tooltip/menu once and exits — a
 //! headless way to verify the pipeline without a GUI session.
@@ -15,23 +17,28 @@ mod summary;
 use ccwatch_core::Paths;
 use std::time::Duration;
 
-/// Menu-bar graph icon size (points; macOS scales for Retina).
-const GRAPH_W: usize = 48;
-const GRAPH_H: usize = 18;
-
 fn main() -> anyhow::Result<()> {
     let paths = Paths::discover();
 
     if std::env::args().any(|a| a == "--dump") {
         client::ensure_daemon(&paths)?;
         let snap = client::latest_snapshot(&paths, Duration::from_secs(5), Duration::from_secs(3))?;
-        println!("title:   {}", summary::tray_title(&snap));
+        let model = summary::menu_model(&snap);
+        println!("title:   {}", summary::tray_title(&snap, true));
         println!("tooltip: {}", summary::tooltip(&snap));
         let rates: Vec<f64> = snap.sessions.iter().map(|s| s.tokens_per_min).collect();
         println!("load:    {}  (per-session tok/min)", graph::unicode_spark(&rates));
         println!("menu:");
-        for line in summary::menu_lines(&snap) {
-            println!("  {line}");
+        println!("  {}", model.header);
+        for a in &model.alerts {
+            println!("  {a}");
+        }
+        for s in &model.sessions {
+            println!("  ▸ {}", s.title);
+            for i in &s.info {
+                println!("      {i}");
+            }
+            println!("      [{}]{}", s.kill_label, if s.can_pause { " [Pause] [Resume]" } else { "" });
         }
         return Ok(());
     }
@@ -41,71 +48,355 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn run(paths: &Paths) -> anyhow::Result<()> {
-    use std::time::Instant;
+    macos::run(paths)
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::{client, graph, summary};
+    use ccwatch_core::ipc::ActionRequest;
+    use ccwatch_core::{Config, Paths};
+    use std::collections::HashMap;
+    use std::sync::mpsc::{Receiver, TryRecvError};
+    use std::time::{Duration, Instant};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::TrayIconBuilder;
 
-    client::ensure_daemon(paths)?;
-    let rx = client::subscribe(paths)?;
+    /// Minimum spacing between graph samples, so the ~45 s window is stable
+    /// regardless of how often the daemon pushes.
+    const SAMPLE_EVERY: Duration = Duration::from_millis(1500);
 
-    let event_loop = EventLoopBuilder::new().build();
-
-    // A fixed pool of disabled rows we update by text each refresh, plus a
-    // separator and Quit. Avoids add/remove churn on every snapshot.
-    const ROWS: usize = 14;
-    let menu = Menu::new();
-    let rows: Vec<MenuItem> = (0..ROWS)
-        .map(|_| MenuItem::new("", false, None))
-        .collect();
-    for r in &rows {
-        let _ = menu.append(r);
+    /// What a clickable menu item does. Rebuilt from the latest model on every
+    /// update, so payloads are never stale.
+    #[derive(Clone)]
+    enum Action {
+        Quit,
+        OpenTui,
+        Pause { pid: i32, name: String },
+        Resume { pid: i32, name: String },
+        Kill { pid: i32, name: String },
+        Cancel { remote: String, id: String, name: String },
     }
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let quit = MenuItem::new("Quit ccwatch", true, None);
-    let _ = menu.append(&quit);
 
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_title("ccwatch …")
-        .with_tooltip("ccwatch")
-        .build()?;
+    /// The live menu items for one session's submenu.
+    struct SessionRow {
+        submenu: Submenu,
+        info: [MenuItem; 3],
+        pause: MenuItem,
+        resume: MenuItem,
+        kill: MenuItem,
+    }
 
-    let menu_channel = MenuEvent::receiver();
-    let quit_id = quit.id().clone();
-    // Rolling history of total tok/min, one sample per graph column.
-    let mut history = graph::History::new(GRAPH_W);
-
-    event_loop.run(move |_event, _target, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(400));
-
-        // Apply the latest snapshot (drain any backlog, keep the newest).
-        let mut latest = None;
-        while let Ok(snap) = rx.try_recv() {
-            latest = Some(snap);
-        }
-        if let Some(snap) = latest {
-            // Live load graph rendered as the menu-bar icon (iStat-style).
-            history.push(snap.totals.tokens_per_min);
-            let rgba = graph::render_rgba(&history.values(), GRAPH_W, GRAPH_H);
-            if let Ok(icon) = tray_icon::Icon::from_rgba(rgba, GRAPH_W as u32, GRAPH_H as u32) {
-                let _ = tray.set_icon(Some(icon));
+    impl SessionRow {
+        fn new(entry: &summary::SessionEntry) -> Self {
+            let submenu = Submenu::new(&entry.title, true);
+            let info = [
+                MenuItem::new(&entry.info[0], false, None),
+                MenuItem::new(&entry.info[1], false, None),
+                MenuItem::new(&entry.info[2], false, None),
+            ];
+            let pause = MenuItem::new("Pause (SIGSTOP)", entry.can_pause, None);
+            let resume = MenuItem::new("Resume (SIGCONT)", entry.can_pause, None);
+            let kill = MenuItem::new(
+                &entry.kill_label,
+                entry.action != summary::SessionAction::None,
+                None,
+            );
+            for i in &info {
+                let _ = submenu.append(i);
             }
-            // Keep a compact text readout beside the graph (alerts win).
-            tray.set_title(Some(summary::tray_title(&snap)));
-            let _ = tray.set_tooltip(Some(summary::tooltip(&snap)));
-            let lines = summary::menu_lines(&snap);
-            for (i, row) in rows.iter().enumerate() {
-                row.set_text(lines.get(i).cloned().unwrap_or_default());
-            }
-        }
-
-        if let Ok(ev) = menu_channel.try_recv() {
-            if ev.id == quit_id {
-                *control_flow = ControlFlow::Exit;
+            let _ = submenu.append(&PredefinedMenuItem::separator());
+            let _ = submenu.append(&pause);
+            let _ = submenu.append(&resume);
+            let _ = submenu.append(&kill);
+            SessionRow {
+                submenu,
+                info,
+                pause,
+                resume,
+                kill,
             }
         }
-    });
+
+        fn update(&self, entry: &summary::SessionEntry) {
+            self.submenu.set_text(&entry.title);
+            for (item, text) in self.info.iter().zip(&entry.info) {
+                item.set_text(text);
+            }
+            self.pause.set_enabled(entry.can_pause);
+            self.resume.set_enabled(entry.can_pause);
+            self.kill.set_text(&entry.kill_label);
+            self.kill
+                .set_enabled(entry.action != summary::SessionAction::None);
+        }
+    }
+
+    /// Owns the dropdown and diffs it against each new [`summary::MenuModel`]:
+    /// stable items update in place; rows are inserted/removed only when counts
+    /// change. No blank filler rows, ever.
+    ///
+    /// Layout: `[header][separator][alerts…][sessions…][separator][Open TUI][Quit]`.
+    struct TrayMenu {
+        menu: Menu,
+        header: MenuItem,
+        alerts: Vec<MenuItem>,
+        sessions: Vec<SessionRow>,
+        open_tui: MenuItem,
+        quit: MenuItem,
+    }
+
+    /// Index of the first dynamic row (after header + separator).
+    const DYN_BASE: usize = 2;
+
+    impl TrayMenu {
+        fn new() -> Self {
+            let menu = Menu::new();
+            let header = MenuItem::new("connecting…", false, None);
+            let open_tui = MenuItem::new("Open TUI dashboard", true, None);
+            let quit = MenuItem::new("Quit ccwatch", true, None);
+            let _ = menu.append(&header);
+            let _ = menu.append(&PredefinedMenuItem::separator());
+            let _ = menu.append(&PredefinedMenuItem::separator());
+            let _ = menu.append(&open_tui);
+            let _ = menu.append(&quit);
+            TrayMenu {
+                menu,
+                header,
+                alerts: Vec::new(),
+                sessions: Vec::new(),
+                open_tui,
+                quit,
+            }
+        }
+
+        fn apply(&mut self, model: &summary::MenuModel) -> HashMap<MenuId, Action> {
+            self.header.set_text(&model.header);
+
+            // Alerts: update in place, then grow/shrink.
+            let common = self.alerts.len().min(model.alerts.len());
+            for i in 0..common {
+                self.alerts[i].set_text(&model.alerts[i]);
+            }
+            for i in self.alerts.len()..model.alerts.len() {
+                let item = MenuItem::new(&model.alerts[i], true, None);
+                let _ = self.menu.insert(&item, DYN_BASE + i);
+                self.alerts.push(item);
+            }
+            while self.alerts.len() > model.alerts.len() {
+                let item = self.alerts.pop().unwrap();
+                let _ = self.menu.remove(&item);
+            }
+
+            // Sessions: same diffing, offset by the (new) alert count.
+            let base = DYN_BASE + self.alerts.len();
+            let common = self.sessions.len().min(model.sessions.len());
+            for i in 0..common {
+                self.sessions[i].update(&model.sessions[i]);
+            }
+            for i in self.sessions.len()..model.sessions.len() {
+                let row = SessionRow::new(&model.sessions[i]);
+                let _ = self.menu.insert(&row.submenu, base + i);
+                self.sessions.push(row);
+            }
+            while self.sessions.len() > model.sessions.len() {
+                let row = self.sessions.pop().unwrap();
+                let _ = self.menu.remove(&row.submenu);
+            }
+
+            // Fresh action map with never-stale payloads.
+            let mut map = HashMap::new();
+            map.insert(self.quit.id().clone(), Action::Quit);
+            map.insert(self.open_tui.id().clone(), Action::OpenTui);
+            for (row, entry) in self.sessions.iter().zip(&model.sessions) {
+                if let summary::SessionAction::Signal { pid } = entry.action {
+                    map.insert(
+                        row.pause.id().clone(),
+                        Action::Pause { pid, name: entry.name.clone() },
+                    );
+                    map.insert(
+                        row.resume.id().clone(),
+                        Action::Resume { pid, name: entry.name.clone() },
+                    );
+                    map.insert(
+                        row.kill.id().clone(),
+                        Action::Kill { pid, name: entry.name.clone() },
+                    );
+                } else if let summary::SessionAction::Cancel { remote, id } = &entry.action {
+                    map.insert(
+                        row.kill.id().clone(),
+                        Action::Cancel {
+                            remote: remote.clone(),
+                            id: id.clone(),
+                            name: entry.name.clone(),
+                        },
+                    );
+                }
+            }
+            map
+        }
+    }
+
+    /// Native confirmation dialog. Returns true when the user clicks `verb`.
+    fn confirm(message: &str, verb: &str) -> bool {
+        let msg = message.replace('"', "'");
+        let script = format!(
+            "display dialog \"{msg}\" buttons {{\"Cancel\", \"{verb}\"}} \
+             default button \"Cancel\" cancel button \"Cancel\" with icon caution \
+             with title \"ccwatch\""
+        );
+        std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &script])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn notify(message: &str) {
+        let msg = message.replace('"', "'");
+        let script = format!("display notification \"{msg}\" with title \"ccwatch\"");
+        let _ = std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &script])
+            .output();
+    }
+
+    /// Run a confirmed destructive action off the UI thread.
+    fn run_action(paths: Paths, prompt: String, verb: &'static str, req: ActionRequest) {
+        std::thread::spawn(move || {
+            if !confirm(&prompt, verb) {
+                return;
+            }
+            let (ok, msg) = client::send_action(&paths, req);
+            notify(&format!("{}{msg}", if ok { "" } else { "failed: " }));
+        });
+    }
+
+    fn open_tui() {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let tui = dir.join("ccwatch");
+                if tui.exists() {
+                    let _ = std::process::Command::new("/usr/bin/open")
+                        .args(["-a", "Terminal"])
+                        .arg(tui)
+                        .spawn();
+                    return;
+                }
+            }
+        }
+        notify("ccwatch binary not found next to ccwatch-menubar");
+    }
+
+    pub fn run(paths: &Paths) -> anyhow::Result<()> {
+        let _ = client::ensure_daemon(paths);
+        let mut rx: Option<Receiver<ccwatch_core::model::Snapshot>> =
+            client::subscribe(paths).ok();
+        let burn = Config::load(&paths.config_file()).burn_tokens_per_min;
+
+        let event_loop = EventLoopBuilder::new().build();
+        let mut tray_menu = TrayMenu::new();
+        let mut actions: HashMap<MenuId, Action> = HashMap::new();
+        actions.insert(tray_menu.quit.id().clone(), Action::Quit);
+        actions.insert(tray_menu.open_tui.id().clone(), Action::OpenTui);
+
+        let mut history = graph::History::new(graph::SLOTS);
+        let initial = graph::render_rgba(&[], burn);
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(tray_menu.menu.clone()))
+            .with_icon(tray_icon::Icon::from_rgba(
+                initial,
+                graph::ICON_W as u32,
+                graph::ICON_H as u32,
+            )?)
+            .with_title("…")
+            .with_tooltip("ccwatch — connecting")
+            .build()?;
+
+        let menu_channel = MenuEvent::receiver();
+        let paths = paths.clone();
+        let mut last_sample = Instant::now() - SAMPLE_EVERY;
+        let mut last_reconnect = Instant::now();
+
+        event_loop.run(move |_event, _target, control_flow| {
+            *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(300));
+
+            // Drain daemon messages, keeping only the newest snapshot.
+            let mut latest = None;
+            if let Some(r) = &rx {
+                loop {
+                    match r.try_recv() {
+                        Ok(snap) => latest = Some(snap),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            rx = None;
+                            tray.set_title(Some("⏻"));
+                            let _ = tray.set_tooltip(Some("ccwatch — daemon disconnected, reconnecting…"));
+                            tray_menu.header.set_text("daemon disconnected — reconnecting…");
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Reconnect if needed (spawns the daemon when it's gone).
+            if rx.is_none() && last_reconnect.elapsed() > Duration::from_secs(2) {
+                last_reconnect = Instant::now();
+                let _ = client::ensure_daemon(&paths);
+                if let Ok(new_rx) = client::subscribe(&paths) {
+                    rx = Some(new_rx);
+                }
+            }
+
+            if let Some(snap) = latest {
+                if last_sample.elapsed() >= SAMPLE_EVERY {
+                    last_sample = Instant::now();
+                    history.push(snap.totals.tokens_per_min);
+                    let rgba = graph::render_rgba(&history.values(), burn);
+                    if let Ok(icon) = tray_icon::Icon::from_rgba(
+                        rgba,
+                        graph::ICON_W as u32,
+                        graph::ICON_H as u32,
+                    ) {
+                        let _ = tray.set_icon(Some(icon));
+                    }
+                }
+                tray.set_title(Some(summary::tray_title(&snap, true)));
+                let _ = tray.set_tooltip(Some(summary::tooltip(&snap)));
+                actions = tray_menu.apply(&summary::menu_model(&snap));
+            }
+
+            // Menu clicks.
+            while let Ok(ev) = menu_channel.try_recv() {
+                match actions.get(&ev.id).cloned() {
+                    Some(Action::Quit) => *control_flow = ControlFlow::Exit,
+                    Some(Action::OpenTui) => open_tui(),
+                    Some(Action::Pause { pid, name }) => {
+                        let (ok, msg) =
+                            client::send_action(&paths, ActionRequest::PauseSession { pid });
+                        notify(&if ok { format!("paused {name}") } else { msg });
+                    }
+                    Some(Action::Resume { pid, name }) => {
+                        let (ok, msg) =
+                            client::send_action(&paths, ActionRequest::ResumeSession { pid });
+                        notify(&if ok { format!("resumed {name}") } else { msg });
+                    }
+                    Some(Action::Kill { pid, name }) => run_action(
+                        paths.clone(),
+                        format!("Kill session \"{name}\" (pid {pid})?\nSIGTERM, then SIGKILL if it survives."),
+                        "Kill",
+                        ActionRequest::KillSession { pid },
+                    ),
+                    Some(Action::Cancel { remote, id, name }) => run_action(
+                        paths.clone(),
+                        format!("Cancel \"{name}\" on {remote}?\nRuns the host's configured cancel command."),
+                        "Cancel it",
+                        ActionRequest::CancelRemote { remote, id },
+                    ),
+                    None => {}
+                }
+            }
+        });
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

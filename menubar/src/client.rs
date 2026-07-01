@@ -1,7 +1,8 @@
-//! Minimal daemon client for the menu-bar: ensure a daemon is up, then stream
-//! snapshots (heartbeats are dropped — the menu bar only cares about state).
+//! Minimal daemon client for the menu-bar: ensure a daemon is up, stream
+//! snapshots (heartbeats are dropped — the menu bar only cares about state),
+//! and send one-shot actions.
 
-use ccwatch_core::ipc::{ClientMsg, ServerMsg};
+use ccwatch_core::ipc::{ActionRequest, ClientMsg, ServerMsg};
 use ccwatch_core::model::Snapshot;
 use ccwatch_core::Paths;
 use std::io::{BufRead, BufReader, Write};
@@ -62,6 +63,23 @@ pub fn subscribe(paths: &Paths) -> anyhow::Result<Receiver<Snapshot>> {
         }
     });
     Ok(rx)
+}
+
+/// Send an action on a fresh connection; returns `(ok, message)`.
+pub fn send_action(paths: &Paths, req: ActionRequest) -> (bool, String) {
+    let inner = || -> anyhow::Result<(bool, String)> {
+        let mut stream = UnixStream::connect(paths.socket())?;
+        stream.write_all((serde_json::to_string(&ClientMsg::Action(req.clone()))? + "\n").as_bytes())?;
+        stream.flush()?;
+        let mut reader = BufReader::new(stream);
+        let mut resp = String::new();
+        reader.read_line(&mut resp)?;
+        match serde_json::from_str::<ServerMsg>(resp.trim())? {
+            ServerMsg::ActionResult { ok, message } => Ok((ok, message)),
+            _ => Ok((false, "unexpected daemon response".into())),
+        }
+    };
+    inner().unwrap_or_else(|e| (false, format!("action failed: {e}")))
 }
 
 /// Block for the first snapshot, then keep the latest that arrives within

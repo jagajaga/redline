@@ -185,10 +185,12 @@ fn handle_client(
     Ok(())
 }
 
-/// Push snapshots whenever they change, heartbeats otherwise, until the client
-/// disconnects (detected on write error).
+/// Push snapshots whenever they change, until the client disconnects (detected
+/// on write error). A heartbeat goes out only after ~3s of silence, as a
+/// liveness signal — not on every poll.
 fn push_loop(writer: &mut UnixStream, shared: &SharedSnapshot) -> anyhow::Result<()> {
     let mut last_sent = 0i64;
+    let mut last_write = std::time::Instant::now();
     loop {
         let snap = shared.read().unwrap().clone();
         if snap.generated_at != last_sent {
@@ -196,15 +198,19 @@ fn push_loop(writer: &mut UnixStream, shared: &SharedSnapshot) -> anyhow::Result
             if send(writer, &ServerMsg::Snapshot(Box::new((*snap).clone()))).is_err() {
                 break;
             }
-        } else if send(
-            writer,
-            &ServerMsg::Heartbeat {
-                at_ms: chrono::Utc::now().timestamp_millis(),
-            },
-        )
-        .is_err()
-        {
-            break;
+            last_write = std::time::Instant::now();
+        } else if last_write.elapsed() > Duration::from_secs(3) {
+            if send(
+                writer,
+                &ServerMsg::Heartbeat {
+                    at_ms: chrono::Utc::now().timestamp_millis(),
+                },
+            )
+            .is_err()
+            {
+                break;
+            }
+            last_write = std::time::Instant::now();
         }
         std::thread::sleep(PUSH_INTERVAL);
     }

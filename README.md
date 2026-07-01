@@ -19,8 +19,13 @@ kill a background process, or disable a hook — all with confirmation.
 
 ### macOS menu bar (`ccwatch-menubar`)
 
-A live load graph rendered right in the menu bar (green→amber→red by burn), with
-a dropdown listing per-host sessions.
+A live load graph rendered right in the menu bar — Retina-crisp 2× bars, colored
+green→amber→red by **absolute burn vs. your configured threshold** (so a steady
+moderate load stays green; red means you're actually burning). The dropdown has
+alerts on top and a submenu per session with live details and **Pause / Resume /
+Kill** actions (destructive ones confirmed via a native dialog, results as
+notifications). Remote sessions get a `Cancel on <host>` action instead. It
+auto-reconnects if the daemon restarts.
 
 ![ccwatch menu bar](docs/screenshot-menubar.svg)
 
