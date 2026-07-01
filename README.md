@@ -92,11 +92,32 @@ including them would make every healthy, well-cached session look like it's on
 fire. Cache reads are tracked separately and feed the cache-bleed heuristic.
 The cumulative "Σ total" figure in the top bar does include everything.
 
+## Remote hosts (SSH — zero install)
+
+Add machines to `~/.claude/ccwatch/remotes.json`:
+
+```json
+[{ "name": "my-server", "kind": "ssh", "target": "user@host" }]
+```
+
+Nothing needs to be installed on the remote: the daemon pipes a self-contained
+Python probe over `ssh <target> python3 -`, which reads the remote `~/.claude`
+*on the remote machine* and emits a snapshot (sessions, tokens, rates, tasks,
+cpu/rss). Requirements: key-based SSH (BatchMode) and python3 on the remote —
+that's it. Fetches run every 15 s (`CCWATCH_REMOTE_SECS` to change); a host
+whose fetch fails shows up as a **remote down** alert instead of silently
+disappearing.
+
+Killing a remote session works with zero config too: the daemon TERMs the
+session's pid over ssh. An explicit `"cancel": ["cmd", "--id", "{id}"]` in the
+remote's entry overrides that (e.g. for cloud routines). `"kind": "cloud"` with
+a custom `fetch` script covers cloud agents — any command that prints the same
+snapshot JSON works.
+
 ## Status
 
-**Phase 1 (local) is complete and tested.** Phases 2 (remote via SSH + cloud
-agents/routines) and 3 (macOS menu-bar client) are designed for in the spec and
-the `Host` abstraction is already in the model, but are not yet implemented.
+**Phases 1–3 are implemented and tested**: local observability, remote SSH
+(zero-install probe) + cloud hooks, and the macOS menu-bar client.
 
 ## Tests
 

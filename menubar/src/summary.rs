@@ -87,10 +87,31 @@ pub struct MenuModel {
     pub sessions: Vec<SessionEntry>,
 }
 
+/// "local 5" or "local 5 · demo-host 2 · cloud 1" — hosts in stable order.
+fn host_counts(s: &Snapshot) -> String {
+    let mut counts: std::collections::BTreeMap<(u8, String), usize> = Default::default();
+    for sess in &s.sessions {
+        let rank = match sess.host {
+            Host::Local => 0u8,
+            Host::Remote { .. } => 1,
+            Host::Cloud => 2,
+        };
+        *counts.entry((rank, host_label(&sess.host))).or_default() += 1;
+    }
+    if counts.is_empty() {
+        return "0 active".into();
+    }
+    counts
+        .into_iter()
+        .map(|((_, label), n)| format!("{label} {n}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 pub fn menu_model(s: &Snapshot) -> MenuModel {
     let header = format!(
-        "{} active · {} tok/min · Σ {} · cache {:.0}%",
-        s.totals.active_sessions,
+        "{} · {} tok/min · Σ {} · cache {:.0}%",
+        host_counts(s),
         rate(s.totals.tokens_per_min),
         tokens(s.totals.total_tokens),
         s.totals.cache_hit_pct
@@ -297,11 +318,40 @@ mod tests {
             message: "cache-read 12%".into(),
             since_ms: 0,
         });
+        s.sessions.push(sess("a", 1.0, Host::Local));
+        s.sessions.push(sess("b", 1.0, Host::Local));
+        let mut r = sess(
+            "c",
+            1.0,
+            Host::Remote {
+                name: "demo-host".into(),
+                ssh_target: "demo-host".into(),
+            },
+        );
+        r.remote_name = Some("demo-host".into());
+        s.sessions.push(r);
         let m = menu_model(&s);
-        assert!(m.header.contains("2 active"));
+        // Per-host counts, local first.
+        assert!(m.header.starts_with("local 2 · demo-host 1"), "header: {}", m.header);
         assert!(m.header.contains("46k tok/min"));
         assert_eq!(m.alerts.len(), 1);
         assert!(m.alerts[0].contains("cache bleed"));
         assert!(m.alerts[0].contains("worker"));
+    }
+
+    #[test]
+    fn remote_down_alert_renders() {
+        let mut s = base();
+        s.alerts.push(Alert {
+            severity: Severity::Warn,
+            kind: AlertKind::RemoteDown,
+            subject: "demo-host".into(),
+            session_id: String::new(),
+            message: "ssh: connect timed out".into(),
+            since_ms: 0,
+        });
+        let m = menu_model(&s);
+        assert!(m.alerts[0].contains("remote down"));
+        assert!(m.alerts[0].contains("demo-host"));
     }
 }

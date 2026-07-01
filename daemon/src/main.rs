@@ -79,15 +79,28 @@ fn main() -> anyhow::Result<()> {
     let _watcher = spawn_fs_watcher(&paths, tick_tx.clone());
 
     // Refresher thread owns the engine and merges cached remote snapshots.
+    // Failing remotes surface as RemoteDown alerts rather than vanishing.
     {
         let shared = shared.clone();
         let config = Config::load(&paths.config_file());
         let paths2 = paths.clone();
         let remote_cache = remote_cache.clone();
+        let remote_errors = manager.errors();
         let build = move |engine: &mut Engine| {
             let local = engine.refresh_now();
             let remotes = remote_cache.read().unwrap().clone();
-            remote::merge(local, &remotes)
+            let mut snap = remote::merge(local, &remotes);
+            for (name, err) in remote_errors.read().unwrap().iter() {
+                snap.alerts.push(ccwatch_core::model::Alert {
+                    severity: ccwatch_core::model::Severity::Warn,
+                    kind: ccwatch_core::model::AlertKind::RemoteDown,
+                    subject: name.clone(),
+                    session_id: String::new(),
+                    message: err.chars().take(120).collect(),
+                    since_ms: snap.generated_at,
+                });
+            }
+            snap
         };
         std::thread::spawn(move || {
             let mut engine = Engine::new(paths2, config);
@@ -172,7 +185,8 @@ fn handle_client(
     match msg {
         ClientMsg::Subscribe => push_loop(&mut writer, &shared)?,
         ClientMsg::Action(req) => {
-            let outcome = execute_action(&req, &paths, &remote_defs);
+            let snapshot = shared.read().unwrap().clone();
+            let outcome = execute_action(&req, &paths, &remote_defs, &snapshot);
             let (ok, message) = match outcome {
                 ActionOutcome::Ok(m) => (true, m),
                 ActionOutcome::Failed(m) => (false, m),
@@ -221,6 +235,7 @@ fn execute_action(
     req: &ActionRequest,
     _paths: &Paths,
     remote_defs: &[RemoteDef],
+    snapshot: &Snapshot,
 ) -> ActionOutcome {
     match req {
         ActionRequest::KillSession { pid } => actions::terminate_session(*pid, KILL_GRACE),
@@ -232,21 +247,55 @@ fn execute_action(
             event,
             command,
         } => actions::disable_hook(std::path::Path::new(settings_path), event, command),
-        ActionRequest::CancelRemote { remote, id } => cancel_remote(remote_defs, remote, id),
+        ActionRequest::CancelRemote { remote, id } => {
+            cancel_remote(remote_defs, remote, id, snapshot)
+        }
     }
 }
 
-/// Run a remote host's configured cancel command for `id`.
-fn cancel_remote(defs: &[RemoteDef], remote: &str, id: &str) -> ActionOutcome {
+/// Cancel an entity on a remote host. An explicitly configured cancel command
+/// wins; for SSH hosts without one, the zero-config default is to TERM the
+/// session's pid on the remote — resolved from the latest merged snapshot.
+fn cancel_remote(defs: &[RemoteDef], remote: &str, id: &str, snap: &Snapshot) -> ActionOutcome {
+    use ccwatch_core::remote::CommandRunner;
     let Some(def) = defs.iter().find(|d| d.name == remote) else {
         return ActionOutcome::Failed(format!("unknown remote '{remote}'"));
     };
-    let Some(argv) = def.cancel_argv(id) else {
-        return ActionOutcome::Failed(format!("remote '{remote}' has no cancel command"));
+
+    let argv = match def.cancel_argv(id) {
+        Some(argv) => argv,
+        None => {
+            // SSH default: kill the remote pid.
+            let Some(target) = &def.target else {
+                return ActionOutcome::Failed(format!("remote '{remote}' has no cancel command"));
+            };
+            let Some(pid) = snap
+                .sessions
+                .iter()
+                .find(|s| s.id == id && s.remote_name.as_deref() == Some(remote))
+                .and_then(|s| s.pid)
+            else {
+                return ActionOutcome::Failed(format!(
+                    "session {id} on '{remote}' has no known pid to kill"
+                ));
+            };
+            vec![
+                "ssh".into(),
+                "-T".into(),
+                "-o".into(),
+                "BatchMode=yes".into(),
+                "-o".into(),
+                "ConnectTimeout=5".into(),
+                target.clone(),
+                "kill".into(),
+                "-TERM".into(),
+                pid.to_string(),
+            ]
+        }
     };
-    use ccwatch_core::remote::CommandRunner;
-    match SystemRunner.run(&argv, KILL_GRACE.saturating_mul(5)) {
-        Ok(out) => ActionOutcome::Ok(format!("cancelled {id} on {remote}: {}", out.trim())),
+
+    match SystemRunner.run(&argv, None, KILL_GRACE.saturating_mul(5)) {
+        Ok(out) => ActionOutcome::Ok(format!("cancelled {id} on {remote} {}", out.trim())),
         Err(e) => ActionOutcome::Failed(format!("cancel {id} on {remote} failed: {e}")),
     }
 }

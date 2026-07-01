@@ -166,6 +166,9 @@ pub enum AlertKind {
     ZombieSession,
     AgentStorm,
     StuckWatcher,
+    /// A configured remote host failed its last fetch — instead of silently
+    /// vanishing from the dashboard, it surfaces here.
+    RemoteDown,
 }
 
 impl AlertKind {
@@ -176,6 +179,7 @@ impl AlertKind {
             AlertKind::ZombieSession => "zombie session",
             AlertKind::AgentStorm => "agent storm",
             AlertKind::StuckWatcher => "stuck watcher",
+            AlertKind::RemoteDown => "remote down",
         }
     }
 }

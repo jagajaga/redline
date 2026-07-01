@@ -9,23 +9,36 @@
 
 use crate::model::{Host, Snapshot};
 use serde::Deserialize;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// Runs an argv and returns its stdout. Injectable for tests.
+/// The zero-install remote probe: piped over `ssh <host> python3 -`, it reads
+/// the remote's `~/.claude` and prints a [`Snapshot`] JSON. Nothing has to be
+/// installed on the remote machine.
+pub const PROBE_PY: &str = include_str!("probe.py");
+
+/// Runs an argv (optionally feeding `stdin`) and returns its stdout.
+/// Injectable for tests.
 pub trait CommandRunner: Send + Sync {
-    fn run(&self, argv: &[String], timeout: Duration) -> anyhow::Result<String>;
+    fn run(&self, argv: &[String], stdin: Option<&str>, timeout: Duration)
+        -> anyhow::Result<String>;
 }
 
-/// The real runner: spawns the process, reads stdout on a thread (so a large
-/// snapshot can't deadlock on a full pipe), and enforces a timeout.
+/// The real runner: spawns the process, feeds stdin and reads stdout on
+/// threads (so large payloads can't deadlock on a full pipe), and enforces a
+/// timeout.
 pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
-    fn run(&self, argv: &[String], timeout: Duration) -> anyhow::Result<String> {
+    fn run(
+        &self,
+        argv: &[String],
+        stdin: Option<&str>,
+        timeout: Duration,
+    ) -> anyhow::Result<String> {
         if argv.is_empty() {
             anyhow::bail!("empty command");
         }
@@ -33,9 +46,22 @@ impl CommandRunner for SystemRunner {
             .args(&argv[1..])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .stdin(Stdio::null())
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .spawn()
             .map_err(|e| anyhow::anyhow!("spawn {:?}: {e}", argv[0]))?;
+
+        if let Some(payload) = stdin {
+            let mut pipe = child.stdin.take().expect("piped stdin");
+            let payload = payload.to_string();
+            // Write on a thread and drop the handle so the child sees EOF.
+            std::thread::spawn(move || {
+                let _ = pipe.write_all(payload.as_bytes());
+            });
+        }
 
         let mut stdout = child.stdout.take().expect("piped stdout");
         let (tx, rx) = mpsc::channel();
@@ -94,16 +120,32 @@ pub struct RemoteDef {
 }
 
 impl RemoteDef {
-    /// The argv to run to fetch this remote's snapshot.
-    pub fn effective_fetch(&self) -> Vec<String> {
+    /// How to fetch this remote's snapshot: `(argv, stdin payload)`.
+    ///
+    /// An explicit `fetch` wins. Otherwise SSH hosts get the **zero-install
+    /// probe**: `ssh <target> python3 -` with [`PROBE_PY`] on stdin — nothing
+    /// needs to be installed on the remote. BatchMode keeps an unreachable or
+    /// password-prompting host from hanging the fetch loop.
+    pub fn fetch_plan(&self) -> Option<(Vec<String>, Option<&'static str>)> {
         if !self.fetch.is_empty() {
-            return self.fetch.clone();
+            return Some((self.fetch.clone(), None));
         }
         match (&self.kind, &self.target) {
-            (RemoteKind::Ssh, Some(t)) => {
-                vec!["ssh".into(), t.clone(), "ccwatchd".into(), "--once".into()]
-            }
-            _ => Vec::new(),
+            (RemoteKind::Ssh, Some(t)) => Some((
+                vec![
+                    "ssh".into(),
+                    "-T".into(),
+                    "-o".into(),
+                    "BatchMode=yes".into(),
+                    "-o".into(),
+                    "ConnectTimeout=5".into(),
+                    t.clone(),
+                    "python3".into(),
+                    "-".into(),
+                ],
+                Some(PROBE_PY),
+            )),
+            _ => None,
         }
     }
 
@@ -138,11 +180,10 @@ pub fn fetch_remote(
     runner: &dyn CommandRunner,
     timeout: Duration,
 ) -> anyhow::Result<Snapshot> {
-    let argv = def.effective_fetch();
-    if argv.is_empty() {
+    let Some((argv, stdin)) = def.fetch_plan() else {
         anyhow::bail!("remote '{}' has no fetch command", def.name);
-    }
-    let out = runner.run(&argv, timeout)?;
+    };
+    let out = runner.run(&argv, stdin, timeout)?;
     let mut snap: Snapshot = serde_json::from_str(out.trim())
         .map_err(|e| anyhow::anyhow!("remote '{}' returned invalid snapshot: {e}", def.name))?;
     let host = def.host();
@@ -219,14 +260,22 @@ mod tests {
     use crate::model::*;
     use std::sync::Mutex;
 
-    /// A runner that returns a canned string and records the argv it saw.
+    /// A runner that returns a canned string and records what it saw.
     struct MockRunner {
         output: String,
-        seen: Mutex<Vec<Vec<String>>>,
+        seen: Mutex<Vec<(Vec<String>, bool)>>,
     }
     impl CommandRunner for MockRunner {
-        fn run(&self, argv: &[String], _t: Duration) -> anyhow::Result<String> {
-            self.seen.lock().unwrap().push(argv.to_vec());
+        fn run(
+            &self,
+            argv: &[String],
+            stdin: Option<&str>,
+            _t: Duration,
+        ) -> anyhow::Result<String> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((argv.to_vec(), stdin.is_some()));
             Ok(self.output.clone())
         }
     }
@@ -264,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_default_fetch_command() {
+    fn ssh_default_is_zero_install_probe() {
         let def = RemoteDef {
             name: "demo-host".into(),
             kind: RemoteKind::Ssh,
@@ -272,10 +321,23 @@ mod tests {
             fetch: vec![],
             cancel: vec![],
         };
-        assert_eq!(
-            def.effective_fetch(),
-            vec!["ssh", "user@demo-host", "ccwatchd", "--once"]
-        );
+        let (argv, stdin) = def.fetch_plan().unwrap();
+        // Pipes the python probe over ssh — nothing installed remotely.
+        assert_eq!(argv[0], "ssh");
+        assert!(argv.contains(&"BatchMode=yes".to_string()), "must not hang on auth");
+        assert!(argv.contains(&"user@demo-host".to_string()));
+        assert_eq!(argv[argv.len() - 2..], ["python3", "-"]);
+        assert_eq!(stdin, Some(PROBE_PY));
+        assert!(PROBE_PY.contains("Snapshot"), "probe source embedded");
+
+        // An explicit fetch overrides the probe.
+        let custom = RemoteDef {
+            fetch: vec!["my-script".into()],
+            ..def
+        };
+        let (argv, stdin) = custom.fetch_plan().unwrap();
+        assert_eq!(argv, vec!["my-script"]);
+        assert_eq!(stdin, None);
     }
 
     #[test]
@@ -301,8 +363,10 @@ mod tests {
             }
             other => panic!("expected Remote host, got {other:?}"),
         }
-        // It ran the default ssh command.
-        assert_eq!(runner.seen.lock().unwrap()[0][0], "ssh");
+        // It ran the default ssh probe with stdin payload.
+        let seen = runner.seen.lock().unwrap();
+        assert_eq!(seen[0].0[0], "ssh");
+        assert!(seen[0].1, "probe should be fed via stdin");
     }
 
     #[test]
