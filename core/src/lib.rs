@@ -13,6 +13,7 @@ pub mod ipc;
 pub mod leaks;
 pub mod model;
 pub mod paths;
+pub mod remote;
 
 pub use config::Config;
 pub use engine::Engine;

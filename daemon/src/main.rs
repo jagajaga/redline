@@ -7,10 +7,14 @@
 //! `ccwatchd --once` prints a single snapshot as JSON and exits — handy for
 //! scripting and verification.
 
+mod remotes;
+
 use ccwatch_core::actions::{self, ActionOutcome};
 use ccwatch_core::ipc::{ActionRequest, ClientMsg, ServerMsg};
 use ccwatch_core::model::Snapshot;
+use ccwatch_core::remote::{self, RemoteDef, SystemRunner};
 use ccwatch_core::{Config, Engine, Paths};
+use remotes::RemoteManager;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{self, Sender};
@@ -20,6 +24,8 @@ use std::time::Duration;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const PUSH_INTERVAL: Duration = Duration::from_millis(500);
 const KILL_GRACE: Duration = Duration::from_secs(2);
+/// How often to re-fetch remote hosts (override with `CCWATCH_REMOTE_SECS`).
+const DEFAULT_REMOTE_SECS: u64 = 15;
 
 type SharedSnapshot = Arc<RwLock<Arc<Snapshot>>>;
 
@@ -53,23 +59,42 @@ fn main() -> anyhow::Result<()> {
     // Shared latest snapshot, updated by the refresher thread.
     let shared: SharedSnapshot = Arc::new(RwLock::new(Arc::new(Snapshot::empty(0))));
 
+    // Remote/cloud hosts: fetched on their own cadence, cached, merged in.
+    let remote_defs = remote::load_remotes(&paths.remotes_file());
+    if !remote_defs.is_empty() {
+        eprintln!("tracking {} remote host(s)", remote_defs.len());
+    }
+    let manager = RemoteManager::new(remote_defs);
+    let remote_cache = manager.cache();
+    let remote_defs = manager.defs();
+    let remote_secs = std::env::var("CCWATCH_REMOTE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_REMOTE_SECS);
+    manager.spawn(Duration::from_secs(remote_secs));
+
     // A tick channel drives refreshes: poll timer + file-change events both send.
     let (tick_tx, tick_rx) = mpsc::channel::<()>();
     spawn_poll_timer(tick_tx.clone());
     let _watcher = spawn_fs_watcher(&paths, tick_tx.clone());
 
-    // Refresher thread owns the engine.
+    // Refresher thread owns the engine and merges cached remote snapshots.
     {
         let shared = shared.clone();
         let config = Config::load(&paths.config_file());
         let paths2 = paths.clone();
+        let remote_cache = remote_cache.clone();
+        let build = move |engine: &mut Engine| {
+            let local = engine.refresh_now();
+            let remotes = remote_cache.read().unwrap().clone();
+            remote::merge(local, &remotes)
+        };
         std::thread::spawn(move || {
             let mut engine = Engine::new(paths2, config);
             // Prime immediately so early subscribers get real data.
-            *shared.write().unwrap() = Arc::new(engine.refresh_now());
+            *shared.write().unwrap() = Arc::new(build(&mut engine));
             for _ in tick_rx {
-                let snap = engine.refresh_now();
-                *shared.write().unwrap() = Arc::new(snap);
+                *shared.write().unwrap() = Arc::new(build(&mut engine));
             }
         });
     }
@@ -81,8 +106,9 @@ fn main() -> anyhow::Result<()> {
                 let shared = shared.clone();
                 let paths = paths.clone();
                 let tick_tx = tick_tx.clone();
+                let remote_defs = remote_defs.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, shared, paths, tick_tx) {
+                    if let Err(e) = handle_client(stream, shared, paths, tick_tx, remote_defs) {
                         eprintln!("client error: {e}");
                     }
                 });
@@ -123,6 +149,7 @@ fn handle_client(
     shared: SharedSnapshot,
     paths: Paths,
     tick_tx: Sender<()>,
+    remote_defs: Arc<Vec<RemoteDef>>,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
@@ -145,7 +172,7 @@ fn handle_client(
     match msg {
         ClientMsg::Subscribe => push_loop(&mut writer, &shared)?,
         ClientMsg::Action(req) => {
-            let outcome = execute_action(&req, &paths);
+            let outcome = execute_action(&req, &paths, &remote_defs);
             let (ok, message) = match outcome {
                 ActionOutcome::Ok(m) => (true, m),
                 ActionOutcome::Failed(m) => (false, m),
@@ -184,7 +211,11 @@ fn push_loop(writer: &mut UnixStream, shared: &SharedSnapshot) -> anyhow::Result
     Ok(())
 }
 
-fn execute_action(req: &ActionRequest, _paths: &Paths) -> ActionOutcome {
+fn execute_action(
+    req: &ActionRequest,
+    _paths: &Paths,
+    remote_defs: &[RemoteDef],
+) -> ActionOutcome {
     match req {
         ActionRequest::KillSession { pid } => actions::terminate_session(*pid, KILL_GRACE),
         ActionRequest::PauseSession { pid } => actions::pause(*pid),
@@ -195,6 +226,22 @@ fn execute_action(req: &ActionRequest, _paths: &Paths) -> ActionOutcome {
             event,
             command,
         } => actions::disable_hook(std::path::Path::new(settings_path), event, command),
+        ActionRequest::CancelRemote { remote, id } => cancel_remote(remote_defs, remote, id),
+    }
+}
+
+/// Run a remote host's configured cancel command for `id`.
+fn cancel_remote(defs: &[RemoteDef], remote: &str, id: &str) -> ActionOutcome {
+    let Some(def) = defs.iter().find(|d| d.name == remote) else {
+        return ActionOutcome::Failed(format!("unknown remote '{remote}'"));
+    };
+    let Some(argv) = def.cancel_argv(id) else {
+        return ActionOutcome::Failed(format!("remote '{remote}' has no cancel command"));
+    };
+    use ccwatch_core::remote::CommandRunner;
+    match SystemRunner.run(&argv, KILL_GRACE.saturating_mul(5)) {
+        Ok(out) => ActionOutcome::Ok(format!("cancelled {id} on {remote}: {}", out.trim())),
+        Err(e) => ActionOutcome::Failed(format!("cancel {id} on {remote} failed: {e}")),
     }
 }
 

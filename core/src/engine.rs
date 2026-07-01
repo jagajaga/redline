@@ -312,6 +312,7 @@ impl Engine {
                 tasks: session_tasks,
                 watchers,
                 host: Host::Local,
+                remote_name: None,
             });
 
             alerts.extend(self.detect_leaks(&leak_inputs, now_ms));

@@ -2,7 +2,8 @@
 
 use crate::app::{agent_at, App, Mode, RowRef};
 use crate::format;
-use ccwatch_core::model::{AgentState, Alert, Session, SessionState, Severity, WatcherKind};
+use ccwatch_core::model::{AgentState, Alert, Host, Session, SessionState, Severity, WatcherKind};
+use std::collections::BTreeMap;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
@@ -41,7 +42,8 @@ fn draw_topbar(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.snapshot.totals;
     let conn = if app.connected { "●" } else { "○ disconnected" };
     let text = format!(
-        " ccwatch  {conn}  local · {} active · {} tok/min · Σ {} · cache {:.0}%",
+        " ccwatch  {conn}  {} · {} active · {} tok/min · Σ {} · cache {:.0}%",
+        host_breakdown(app),
         t.active_sessions,
         format::rate(t.tokens_per_min),
         format::tokens(t.total_tokens),
@@ -56,6 +58,41 @@ fn draw_topbar(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(text).style(style.add_modifier(Modifier::BOLD)),
         area,
     );
+}
+
+/// "local 3" or "local 3 · demo-host 1 · cloud 2" across every host present.
+fn host_breakdown(app: &App) -> String {
+    let mut counts: BTreeMap<(u8, String), usize> = BTreeMap::new();
+    for s in &app.snapshot.sessions {
+        let rank = match s.host {
+            Host::Local => 0u8,
+            Host::Remote { .. } => 1,
+            Host::Cloud => 2,
+        };
+        *counts.entry((rank, s.host.label())).or_default() += 1;
+    }
+    if counts.is_empty() {
+        return "local".to_string();
+    }
+    counts
+        .into_iter()
+        .map(|((_, label), n)| format!("{label} {n}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn host_tag(host: &Host) -> Option<Span<'static>> {
+    match host {
+        Host::Local => None,
+        Host::Remote { name, .. } => Some(Span::styled(
+            format!("{name} "),
+            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        )),
+        Host::Cloud => Some(Span::styled(
+            "☁ cloud ",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        )),
+    }
 }
 
 fn draw_alerts(f: &mut Frame, area: Rect, app: &App) {
@@ -184,8 +221,11 @@ fn session_line(s: &Session, app: &App) -> Line<'static> {
     } else {
         "▸ "
     };
-    Line::from(vec![
-        Span::raw(expand),
+    let mut spans = vec![Span::raw(expand)];
+    if let Some(tag) = host_tag(&s.host) {
+        spans.push(tag);
+    }
+    spans.extend([
         Span::styled(
             format!("{:<20}", truncate(&s.name, 20)),
             Style::default().add_modifier(Modifier::BOLD),
@@ -198,7 +238,8 @@ fn session_line(s: &Session, app: &App) -> Line<'static> {
         Span::raw(format!(" {:>3.0}% ", s.cpu_pct)),
         Span::raw(format!("{:>4}M", s.rss_mb)),
         Span::styled(format!("  [{model}]"), Style::default().fg(Color::DarkGray)),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 fn agent_line(a: Option<&ccwatch_core::model::Agent>, depth: usize, app: &App) -> Line<'static> {
@@ -532,6 +573,21 @@ mod tests {
         ] {
             assert!(s.contains(needle), "expected screen to contain {needle:?}\n{s}");
         }
+    }
+
+    #[test]
+    fn renders_host_tags_and_breakdown() {
+        let mut remote = session("s2", "worker", vec![]);
+        remote.host = ccwatch_core::model::Host::Remote {
+            name: "demo-host".into(),
+            ssh_target: "demo-host".into(),
+        };
+        let snap = snapshot(vec![session("s1", "webapp", vec![]), remote]);
+        let app = app_with(snap);
+        let s = render(&app);
+        // Top-bar breakdown lists both hosts, and the remote row is tagged.
+        assert!(s.contains("local 1"), "breakdown missing local:\n{s}");
+        assert!(s.contains("demo-host"), "remote host tag/breakdown missing:\n{s}");
     }
 
     #[test]

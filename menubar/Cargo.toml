@@ -1,0 +1,19 @@
+[package]
+name = "ccwatch-menubar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ccwatch-menubar"
+path = "src/main.rs"
+
+[dependencies]
+ccwatch-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.19"
+tao = "0.30"

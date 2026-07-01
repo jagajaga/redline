@@ -216,6 +216,10 @@ pub struct Session {
     pub tasks: Vec<Task>,
     pub watchers: Vec<Watcher>,
     pub host: Host,
+    /// For remote/cloud sessions: the name of the [`crate::remote::RemoteDef`]
+    /// they came from, so a client can target it for cancel. `None` for local.
+    #[serde(default)]
+    pub remote_name: Option<String>,
 }
 
 /// Aggregate figures for the top bar.

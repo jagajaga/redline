@@ -51,6 +51,10 @@ impl Paths {
     pub fn config_file(&self) -> PathBuf {
         self.ccwatch_dir().join("config.toml")
     }
+    /// Remote/cloud host definitions (JSON array of `RemoteDef`).
+    pub fn remotes_file(&self) -> PathBuf {
+        self.ccwatch_dir().join("remotes.json")
+    }
     pub fn action_log(&self) -> PathBuf {
         self.ccwatch_dir().join("actions.log")
     }

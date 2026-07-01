@@ -23,6 +23,9 @@ pub enum ActionRequest {
         event: String,
         command: String,
     },
+    /// Cancel a remote/cloud entity (e.g. a routine) via its host's configured
+    /// cancel command.
+    CancelRemote { remote: String, id: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

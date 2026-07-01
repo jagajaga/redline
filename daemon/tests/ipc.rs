@@ -114,6 +114,113 @@ fn daemon_streams_snapshot_and_handles_action() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn daemon_merges_remote_and_cancels() {
+    use ccwatch_core::model::*;
+
+    let root = std::env::temp_dir().join(format!("ccw-remote-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let paths = Paths::new(&root);
+    std::fs::create_dir_all(paths.ccwatch_dir()).unwrap();
+
+    // A canned remote snapshot the fetch command will emit.
+    let mut remote_snap = Snapshot::empty(1234);
+    remote_snap.sessions.push(Session {
+        id: "rw1".into(),
+        name: "remote-worker".into(),
+        cwd: "/remote/proj".into(),
+        pid: Some(999),
+        kind: "interactive".into(),
+        entrypoint: "cli".into(),
+        version: "2".into(),
+        model: Some("claude-opus-4-8".into()),
+        state: SessionState::Running,
+        started_at: Some(0),
+        last_activity: Some(0),
+        tokens: TokenLedger { input: 1, output: 2, ..Default::default() },
+        tokens_per_min: 1234.0,
+        cpu_pct: 0.0,
+        rss_mb: 0,
+        agents: vec![],
+        tasks: vec![],
+        watchers: vec![],
+        host: Host::Local,
+        remote_name: None,
+    });
+    let snap_file = root.join("remote_snap.json");
+    std::fs::write(&snap_file, serde_json::to_string(&remote_snap).unwrap()).unwrap();
+
+    // Cancel writes a marker file so we can assert {id} substitution ran.
+    let cancel_out = root.join("cancel_out.txt");
+
+    let remotes = serde_json::json!([{
+        "name": "demo-host",
+        "kind": "ssh",
+        "target": "user@demo-host",
+        "fetch": ["cat", snap_file.to_str().unwrap()],
+        "cancel": ["sh", "-c", format!("echo {{id}} > {}", cancel_out.to_str().unwrap())],
+    }]);
+    std::fs::write(paths.remotes_file(), serde_json::to_string(&remotes).unwrap()).unwrap();
+
+    let _child = Child(
+        std::process::Command::new(env!("CARGO_BIN_EXE_ccwatchd"))
+            .env("CLAUDE_CONFIG_DIR", &root)
+            .env("CCWATCH_REMOTE_SECS", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn ccwatchd"),
+    );
+
+    // Subscribe and wait for the remote session to appear, tagged Remote.
+    let stream = connect(&paths);
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    writer
+        .write_all((serde_json::to_string(&ClientMsg::Subscribe).unwrap() + "\n").as_bytes())
+        .unwrap();
+    writer.flush().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut found = false;
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            break;
+        }
+        if let Ok(ServerMsg::Snapshot(snap)) = serde_json::from_str::<ServerMsg>(line.trim()) {
+            if let Some(s) = snap.sessions.iter().find(|s| s.id == "rw1") {
+                assert_eq!(s.name, "remote-worker");
+                match &s.host {
+                    Host::Remote { name, ssh_target } => {
+                        assert_eq!(name, "demo-host");
+                        assert_eq!(ssh_target, "user@demo-host");
+                    }
+                    other => panic!("expected Remote host, got {other:?}"),
+                }
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(found, "remote session never merged into snapshot");
+
+    // Cancel a routine on the remote; assert {id} substitution executed.
+    let (ok, msg) = send_action(
+        &paths,
+        ActionRequest::CancelRemote {
+            remote: "demo-host".into(),
+            id: "routine-9".into(),
+        },
+    );
+    assert!(ok, "cancel failed: {msg}");
+    let marker = std::fs::read_to_string(&cancel_out).unwrap();
+    assert_eq!(marker.trim(), "routine-9");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn send_action(paths: &Paths, req: ActionRequest) -> (bool, String) {
     let mut stream = UnixStream::connect(paths.socket()).unwrap();
     stream

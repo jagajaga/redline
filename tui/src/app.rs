@@ -2,7 +2,7 @@
 //! fuzzy jump, action staging). Rendering lives in `ui`; daemon I/O in `client`.
 
 use ccwatch_core::ipc::ActionRequest;
-use ccwatch_core::model::{Agent, Session, Snapshot};
+use ccwatch_core::model::{Agent, Host, Session, Snapshot};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use std::collections::HashSet;
@@ -256,7 +256,7 @@ impl App {
         let mut items = Vec::new();
         for s in &self.snapshot.sessions {
             items.push(JumpItem {
-                label: format!("session {}", s.name),
+                label: format!("session {} [{}]", s.name, s.host.label()),
                 kind: "session",
                 session_id: s.id.clone(),
                 agent_path: Vec::new(),
@@ -285,15 +285,50 @@ impl App {
     // ---- actions ------------------------------------------------------------
 
     /// Stage a kill/pause/resume for the selected session (confirmation next).
+    ///
+    /// Local sessions use OS signals against the pid. Remote/cloud sessions
+    /// can't be signalled from here (the pid lives on another machine), so
+    /// "kill" maps to the host's configured cancel command and pause/resume are
+    /// unavailable.
     pub fn stage_action(&mut self, kind: ActionKind) {
         let Some(s) = self.selected_session() else {
             return;
         };
-        let Some(pid) = s.pid else {
+        // Snapshot the owned fields we need, then drop the borrow of self.
+        let is_local = matches!(s.host, Host::Local);
+        let host_label = s.host.label();
+        let pid = s.pid;
+        let name = s.name.clone();
+        let id = s.id.clone();
+        let remote_name = s.remote_name.clone();
+
+        if !is_local {
+            match kind {
+                ActionKind::Kill => {
+                    let Some(remote) = remote_name else {
+                        self.status = Some("remote session has no host name to target".into());
+                        return;
+                    };
+                    self.mode = Mode::Confirm(PendingAction {
+                        request: ActionRequest::CancelRemote { remote, id },
+                        prompt: format!(
+                            "Cancel \"{name}\" on {host_label} (runs host cancel command)? [y/n]"
+                        ),
+                    });
+                }
+                ActionKind::Pause | ActionKind::Resume => {
+                    self.status = Some(
+                        "pause/resume is local-only; use k to cancel a remote/cloud session".into(),
+                    );
+                }
+            }
+            return;
+        }
+
+        let Some(pid) = pid else {
             self.status = Some("selected session has no pid".into());
             return;
         };
-        let name = s.name.clone();
         let (request, prompt) = match kind {
             ActionKind::Kill => (
                 ActionRequest::KillSession { pid },
@@ -447,6 +482,7 @@ pub(crate) mod test_support {
                 pid: None,
             }],
             host: Host::Local,
+            remote_name: None,
         }
     }
 
@@ -539,6 +575,32 @@ mod tests {
             Some(ccwatch_core::ipc::ActionRequest::KillSession { pid }) => assert_eq!(pid, 4242),
             other => panic!("expected KillSession, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn remote_kill_maps_to_cancel_and_pause_is_blocked() {
+        let mut s = session("s1", "worker", vec![]);
+        s.host = Host::Remote {
+            name: "demo-host".into(),
+            ssh_target: "user@demo-host".into(),
+        };
+        s.remote_name = Some("demo-host".into());
+        let mut app = app_with(snapshot(vec![s]));
+
+        // Kill on a remote session becomes a CancelRemote targeting its host.
+        app.stage_action(ActionKind::Kill);
+        match app.take_pending() {
+            Some(ccwatch_core::ipc::ActionRequest::CancelRemote { remote, id }) => {
+                assert_eq!(remote, "demo-host");
+                assert_eq!(id, "s1");
+            }
+            other => panic!("expected CancelRemote, got {other:?}"),
+        }
+
+        // Pause is local-only: no confirm staged, a status message instead.
+        app.stage_action(ActionKind::Pause);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.status.as_deref().unwrap_or("").contains("local-only"));
     }
 
     #[test]
