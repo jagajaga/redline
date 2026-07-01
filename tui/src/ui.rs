@@ -575,6 +575,168 @@ mod tests {
         }
     }
 
+    /// Map a ratatui color to a hex string (catppuccin-ish palette), given the
+    /// default to use for `Reset`.
+    fn hex(c: Color, default: &str) -> String {
+        match c {
+            Color::Reset => default.to_string(),
+            Color::Black => "#11111b".into(),
+            Color::Red => "#f38ba8".into(),
+            Color::Green => "#a6e3a1".into(),
+            Color::Yellow => "#f9e2af".into(),
+            Color::Blue => "#89b4fa".into(),
+            Color::Magenta => "#f5c2e7".into(),
+            Color::Cyan => "#94e2d5".into(),
+            Color::Gray => "#bac2de".into(),
+            Color::DarkGray => "#6c7086".into(),
+            Color::White => "#cdd6f4".into(),
+            _ => default.to_string(),
+        }
+    }
+
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    /// Convert a rendered ratatui buffer into a standalone terminal-style SVG.
+    fn buffer_to_svg(buf: &ratatui::buffer::Buffer) -> String {
+        const CW: f64 = 8.4;
+        const CH: f64 = 18.0;
+        const PAD: f64 = 14.0;
+        const TOP: f64 = 34.0;
+        let cols = buf.area.width;
+        let rows = buf.area.height;
+        let w = cols as f64 * CW + PAD * 2.0;
+        let h = rows as f64 * CH + PAD * 2.0 + TOP;
+        let bg = "#1e1e2e";
+        let default_fg = "#cdd6f4";
+
+        let mut s = String::new();
+        s.push_str(&format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w:.0} {h:.0}\" font-family=\"SFMono-Regular,Menlo,Consolas,monospace\" font-size=\"13\">\n"
+        ));
+        s.push_str(&format!(
+            "<rect width=\"{w:.0}\" height=\"{h:.0}\" rx=\"10\" fill=\"{bg}\"/>\n"
+        ));
+        // Window chrome dots.
+        for (i, c) in ["#f38ba8", "#f9e2af", "#a6e3a1"].iter().enumerate() {
+            s.push_str(&format!(
+                "<circle cx=\"{}\" cy=\"18\" r=\"6\" fill=\"{c}\"/>\n",
+                PAD + 6.0 + i as f64 * 18.0
+            ));
+        }
+
+        for y in 0..rows {
+            let mut x = 0u16;
+            while x < cols {
+                let cell = &buf[(x, y)];
+                let rev = cell.modifier.contains(Modifier::REVERSED);
+                let (fg0, bg0) = (cell.fg, cell.bg);
+                // Gather a run of same-style cells.
+                let mut run = String::new();
+                let startx = x;
+                while x < cols {
+                    let c = &buf[(x, y)];
+                    if c.fg == fg0
+                        && c.bg == bg0
+                        && c.modifier.contains(Modifier::REVERSED) == rev
+                    {
+                        run.push_str(c.symbol());
+                        x += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let (text_fg, rect_bg) = if rev {
+                    (hex(bg0, bg), Some(hex(fg0, default_fg)))
+                } else {
+                    let rb = if matches!(bg0, Color::Reset) {
+                        None
+                    } else {
+                        Some(hex(bg0, bg))
+                    };
+                    (hex(fg0, default_fg), rb)
+                };
+                let px = PAD + startx as f64 * CW;
+                let py = TOP + PAD + y as f64 * CH;
+                let rw = (x - startx) as f64 * CW;
+                if let Some(rb) = rect_bg {
+                    s.push_str(&format!(
+                        "<rect x=\"{px:.1}\" y=\"{:.1}\" width=\"{rw:.1}\" height=\"{CH}\" fill=\"{rb}\"/>\n",
+                        py - 13.0
+                    ));
+                }
+                if !run.trim().is_empty() {
+                    s.push_str(&format!(
+                        "<text x=\"{px:.1}\" y=\"{py:.1}\" xml:space=\"preserve\" fill=\"{text_fg}\">{}</text>\n",
+                        xml_escape(&run)
+                    ));
+                }
+            }
+        }
+        s.push_str("</svg>\n");
+        s
+    }
+
+    /// Render a rich, representative frame and write it to `docs/` as an SVG.
+    /// Ignored by default; run with `cargo test -p ccwatch-tui emit_tui -- --ignored`.
+    #[test]
+    #[ignore]
+    fn emit_tui_screenshot_svg() {
+        use ccwatch_core::model::*;
+
+        // A busy, representative scene: a hot local session with nested agents,
+        // a quiet local one, and a remote host — plus alerts.
+        let mut webapp = session(
+            "s1",
+            "webapp",
+            vec![{
+                let mut e = agent("a1", "search ~/.claude", vec![agent("a2", "sub-scan configs", vec![])]);
+                e.subagent_type = "Explore".into();
+                e
+            }],
+        );
+        webapp.tasks = vec![
+            Task { subject: "bump dependencies".into(), status: "in_progress".into(), blocked: false, active_form: None },
+            Task { subject: "audit deploy".into(), status: "pending".into(), blocked: true, active_form: None },
+            Task { subject: "update changelog".into(), status: "completed".into(), blocked: false, active_form: None },
+        ];
+
+        let mut quiet = session("s2", "ccwatch", vec![]);
+        quiet.tokens_per_min = 1_000.0;
+
+        let mut remote = session("s3", "remote-worker", vec![]);
+        remote.host = Host::Remote { name: "demo-host".into(), ssh_target: "user@demo-host".into() };
+        remote.remote_name = Some("demo-host".into());
+        remote.tokens_per_min = 8_000.0;
+
+        let mut snap = snapshot(vec![webapp, quiet, remote]);
+        snap.alerts = vec![
+            Alert { severity: Severity::Critical, kind: AlertKind::RunawayLoop, subject: "webapp".into(), session_id: "s1".into(), message: "62k tok/min · no user turn 7m · agent×2".into(), since_ms: 0 },
+            Alert { severity: Severity::Warn, kind: AlertKind::AgentStorm, subject: "webapp".into(), session_id: "s1".into(), message: "2 agents spawned in 40s".into(), since_ms: 0 },
+        ];
+        snap.totals = Totals { active_sessions: 3, tokens_per_min: 71_000.0, total_tokens: 4_200_000, cache_hit_pct: 71.0 };
+
+        let mut app = App::new(snap.generated_at);
+        app.connected = true;
+        app.set_snapshot(snap);
+        app.expanded.insert("s1".into()); // show webapp's agents
+        app.expanded.insert("a1".into()); // show the nested sub-scan
+        app.move_selection(1); // land on the Explore agent → agent details
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(118, 32)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let svg = buffer_to_svg(terminal.backend().buffer());
+
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("screenshot-tui.svg"), svg).unwrap();
+    }
+
     #[test]
     fn renders_host_tags_and_breakdown() {
         let mut remote = session("s2", "worker", vec![]);

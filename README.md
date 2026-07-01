@@ -11,6 +11,19 @@ process CPU/RSS, and flags leaks (runaway loops, cache bleed, zombie sessions,
 agent storms). You can act on what you find — pause, resume, or kill a session,
 kill a background process, or disable a hook — all with confirmation.
 
+## Screenshots
+
+### Terminal UI (`ccwatch`)
+
+![ccwatch terminal UI](docs/screenshot-tui.svg)
+
+### macOS menu bar (`ccwatch-menubar`)
+
+A live load graph rendered right in the menu bar (green→amber→red by burn), with
+a dropdown listing per-host sessions.
+
+![ccwatch menu bar](docs/screenshot-menubar.svg)
+
 ## Design
 
 The full design is in
