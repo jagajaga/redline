@@ -1,0 +1,17 @@
+[package]
+name = "ccwatch-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ccwatchd"
+path = "src/main.rs"
+
+[dependencies]
+ccwatch-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+notify = "6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

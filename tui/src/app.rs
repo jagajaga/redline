@@ -1,0 +1,555 @@
+//! TUI application state and the pure logic over it (navigation, expansion,
+//! fuzzy jump, action staging). Rendering lives in `ui`; daemon I/O in `client`.
+
+use ccwatch_core::ipc::ActionRequest;
+use ccwatch_core::model::{Agent, Session, Snapshot};
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
+use std::collections::HashSet;
+
+/// A reference to a row in the session/agent tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowRef {
+    Session(usize),
+    /// (session index, path of child indices into the agent tree).
+    Agent(usize, Vec<usize>),
+}
+
+#[derive(Clone, Debug)]
+pub struct VisibleRow {
+    pub row: RowRef,
+    /// Stable key: session id or agent id.
+    pub key: String,
+    pub depth: usize,
+}
+
+/// A fuzzy-jump candidate spanning every entity type.
+#[derive(Clone, Debug)]
+pub struct JumpItem {
+    pub label: String,
+    pub kind: &'static str,
+    pub session_id: String,
+    /// Chain of agent ids from the top-level agent down to this item, so we can
+    /// expand ancestors before selecting.
+    pub agent_path: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingAction {
+    pub request: ActionRequest,
+    pub prompt: String,
+}
+
+pub enum Mode {
+    Normal,
+    Fuzzy {
+        query: String,
+        results: Vec<JumpItem>,
+        cursor: usize,
+    },
+    Confirm(PendingAction),
+}
+
+pub struct App {
+    pub snapshot: Snapshot,
+    pub connected: bool,
+    pub status: Option<String>,
+    pub expanded: HashSet<String>,
+    pub selected: usize,
+    pub hide_idle: bool,
+    pub mode: Mode,
+    pub should_quit: bool,
+    pub now_ms: i64,
+    matcher: SkimMatcherV2,
+    /// After a jump, the key we want selected once rows are recomputed.
+    pending_select: Option<String>,
+}
+
+impl App {
+    pub fn new(now_ms: i64) -> Self {
+        App {
+            snapshot: Snapshot::empty(now_ms),
+            connected: false,
+            status: None,
+            expanded: HashSet::new(),
+            selected: 0,
+            hide_idle: false,
+            mode: Mode::Normal,
+            should_quit: false,
+            now_ms,
+            matcher: SkimMatcherV2::default(),
+            pending_select: None,
+        }
+    }
+
+    pub fn set_snapshot(&mut self, snap: Snapshot) {
+        self.now_ms = snap.generated_at;
+        self.snapshot = snap;
+        self.reconcile_selection();
+    }
+
+    /// Sessions honoring the idle filter.
+    pub fn sessions(&self) -> Vec<(usize, &Session)> {
+        self.snapshot
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                !self.hide_idle || !matches!(s.state, ccwatch_core::model::SessionState::Idle)
+            })
+            .collect()
+    }
+
+    /// Flatten sessions and (expanded) agent trees into display rows.
+    pub fn visible_rows(&self) -> Vec<VisibleRow> {
+        let mut rows = Vec::new();
+        for (si, s) in self.sessions() {
+            rows.push(VisibleRow {
+                row: RowRef::Session(si),
+                key: s.id.clone(),
+                depth: 0,
+            });
+            if self.expanded.contains(&s.id) {
+                push_agents(&s.agents, si, &mut Vec::new(), 1, &self.expanded, &mut rows);
+            }
+        }
+        rows
+    }
+
+    fn reconcile_selection(&mut self) {
+        let rows = self.visible_rows();
+        if let Some(key) = self.pending_select.take() {
+            if let Some(idx) = rows.iter().position(|r| r.key == key) {
+                self.selected = idx;
+                return;
+            }
+        }
+        if rows.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= rows.len() {
+            self.selected = rows.len() - 1;
+        }
+    }
+
+    pub fn selected_row(&self) -> Option<VisibleRow> {
+        self.visible_rows().into_iter().nth(self.selected)
+    }
+
+    /// The session that owns the current selection (session row or agent row).
+    pub fn selected_session(&self) -> Option<&Session> {
+        match self.selected_row()?.row {
+            RowRef::Session(i) | RowRef::Agent(i, _) => self.snapshot.sessions.get(i),
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = self.visible_rows().len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.selected as isize;
+        let next = (cur + delta).clamp(0, len as isize - 1);
+        self.selected = next as usize;
+    }
+
+    /// Expand/collapse the selected row if it has children.
+    pub fn toggle_expand(&mut self) {
+        if let Some(vr) = self.selected_row() {
+            let has_children = match &vr.row {
+                RowRef::Session(i) => self
+                    .snapshot
+                    .sessions
+                    .get(*i)
+                    .map(|s| !s.agents.is_empty())
+                    .unwrap_or(false),
+                RowRef::Agent(i, path) => agent_at(&self.snapshot.sessions[*i].agents, path)
+                    .map(|a| !a.children.is_empty())
+                    .unwrap_or(false),
+            };
+            if has_children && !self.expanded.remove(&vr.key) {
+                self.expanded.insert(vr.key);
+            }
+        }
+    }
+
+    // ---- fuzzy jump ---------------------------------------------------------
+
+    pub fn open_fuzzy(&mut self) {
+        self.mode = Mode::Fuzzy {
+            query: String::new(),
+            results: self.all_jump_items(),
+            cursor: 0,
+        };
+    }
+
+    pub fn fuzzy_input(&mut self, c: char) {
+        if let Mode::Fuzzy { query, .. } = &mut self.mode {
+            query.push(c);
+            self.refresh_fuzzy();
+        }
+    }
+
+    pub fn fuzzy_backspace(&mut self) {
+        if let Mode::Fuzzy { query, .. } = &mut self.mode {
+            query.pop();
+            self.refresh_fuzzy();
+        }
+    }
+
+    pub fn fuzzy_move(&mut self, delta: isize) {
+        if let Mode::Fuzzy { results, cursor, .. } = &mut self.mode {
+            if results.is_empty() {
+                return;
+            }
+            let n = results.len() as isize;
+            *cursor = ((*cursor as isize + delta).rem_euclid(n)) as usize;
+        }
+    }
+
+    fn refresh_fuzzy(&mut self) {
+        let all = self.all_jump_items();
+        if let Mode::Fuzzy { query, results, cursor } = &mut self.mode {
+            if query.is_empty() {
+                *results = all;
+            } else {
+                let mut scored: Vec<(i64, JumpItem)> = all
+                    .into_iter()
+                    .filter_map(|it| {
+                        self.matcher
+                            .fuzzy_match(&it.label, query)
+                            .map(|score| (score, it))
+                    })
+                    .collect();
+                scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+                *results = scored.into_iter().map(|(_, it)| it).collect();
+            }
+            *cursor = 0;
+        }
+    }
+
+    /// Commit the highlighted fuzzy result: expand ancestors and select it.
+    pub fn fuzzy_commit(&mut self) {
+        let chosen = if let Mode::Fuzzy { results, cursor, .. } = &self.mode {
+            results.get(*cursor).cloned()
+        } else {
+            None
+        };
+        self.mode = Mode::Normal;
+        if let Some(item) = chosen {
+            self.expanded.insert(item.session_id.clone());
+            for aid in &item.agent_path {
+                self.expanded.insert(aid.clone());
+            }
+            // Select the deepest entity that maps to a row: the last agent in
+            // the path, else the session.
+            self.pending_select = Some(
+                item.agent_path
+                    .last()
+                    .cloned()
+                    .unwrap_or(item.session_id.clone()),
+            );
+            self.reconcile_selection();
+        }
+    }
+
+    fn all_jump_items(&self) -> Vec<JumpItem> {
+        let mut items = Vec::new();
+        for s in &self.snapshot.sessions {
+            items.push(JumpItem {
+                label: format!("session {}", s.name),
+                kind: "session",
+                session_id: s.id.clone(),
+                agent_path: Vec::new(),
+            });
+            collect_agent_items(&s.agents, &s.id, &mut Vec::new(), &mut items);
+            for t in &s.tasks {
+                items.push(JumpItem {
+                    label: format!("task {}", t.subject),
+                    kind: "task",
+                    session_id: s.id.clone(),
+                    agent_path: Vec::new(),
+                });
+            }
+            for w in &s.watchers {
+                items.push(JumpItem {
+                    label: format!("watcher {} {}", w.name, w.detail),
+                    kind: "watcher",
+                    session_id: s.id.clone(),
+                    agent_path: Vec::new(),
+                });
+            }
+        }
+        items
+    }
+
+    // ---- actions ------------------------------------------------------------
+
+    /// Stage a kill/pause/resume for the selected session (confirmation next).
+    pub fn stage_action(&mut self, kind: ActionKind) {
+        let Some(s) = self.selected_session() else {
+            return;
+        };
+        let Some(pid) = s.pid else {
+            self.status = Some("selected session has no pid".into());
+            return;
+        };
+        let name = s.name.clone();
+        let (request, prompt) = match kind {
+            ActionKind::Kill => (
+                ActionRequest::KillSession { pid },
+                format!("Kill session \"{name}\" (pid {pid})? SIGTERM→SIGKILL. [y/n]"),
+            ),
+            ActionKind::Pause => (
+                ActionRequest::PauseSession { pid },
+                format!("Pause session \"{name}\" (pid {pid})? SIGSTOP. [y/n]"),
+            ),
+            ActionKind::Resume => (
+                ActionRequest::ResumeSession { pid },
+                format!("Resume session \"{name}\" (pid {pid})? SIGCONT. [y/n]"),
+            ),
+        };
+        self.mode = Mode::Confirm(PendingAction { request, prompt });
+    }
+
+    /// Take the staged request (on confirm).
+    pub fn take_pending(&mut self) -> Option<ActionRequest> {
+        if let Mode::Confirm(p) = &self.mode {
+            let req = p.request.clone();
+            self.mode = Mode::Normal;
+            Some(req)
+        } else {
+            None
+        }
+    }
+
+    pub fn cancel_mode(&mut self) {
+        self.mode = Mode::Normal;
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ActionKind {
+    Kill,
+    Pause,
+    Resume,
+}
+
+fn push_agents(
+    agents: &[Agent],
+    si: usize,
+    path: &mut Vec<usize>,
+    depth: usize,
+    expanded: &HashSet<String>,
+    out: &mut Vec<VisibleRow>,
+) {
+    for (ai, a) in agents.iter().enumerate() {
+        path.push(ai);
+        out.push(VisibleRow {
+            row: RowRef::Agent(si, path.clone()),
+            key: a.id.clone(),
+            depth,
+        });
+        if expanded.contains(&a.id) && !a.children.is_empty() {
+            push_agents(&a.children, si, path, depth + 1, expanded, out);
+        }
+        path.pop();
+    }
+}
+
+fn collect_agent_items(
+    agents: &[Agent],
+    session_id: &str,
+    ancestors: &mut Vec<String>,
+    out: &mut Vec<JumpItem>,
+) {
+    for a in agents {
+        ancestors.push(a.id.clone());
+        out.push(JumpItem {
+            label: format!("agent {} [{}]", a.description, a.subagent_type),
+            kind: "agent",
+            session_id: session_id.to_string(),
+            agent_path: ancestors.clone(),
+        });
+        collect_agent_items(&a.children, session_id, ancestors, out);
+        ancestors.pop();
+    }
+}
+
+/// Resolve an agent by child-index path.
+pub fn agent_at<'a>(agents: &'a [Agent], path: &[usize]) -> Option<&'a Agent> {
+    let mut cur = agents;
+    let mut node = None;
+    for &i in path {
+        node = cur.get(i);
+        cur = &node?.children;
+    }
+    node
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use ccwatch_core::model::*;
+
+    pub fn agent(id: &str, desc: &str, children: Vec<Agent>) -> Agent {
+        Agent {
+            id: id.into(),
+            subagent_type: "general-purpose".into(),
+            description: desc.into(),
+            model: Some("opus".into()),
+            state: AgentState::Running,
+            started_at: Some(1000),
+            tokens: TokenLedger::default(),
+            tokens_per_min: 0.0,
+            children,
+        }
+    }
+
+    pub fn session(id: &str, name: &str, agents: Vec<Agent>) -> Session {
+        Session {
+            id: id.into(),
+            name: name.into(),
+            cwd: "/tmp/proj".into(),
+            pid: Some(4242),
+            kind: "interactive".into(),
+            entrypoint: "cli".into(),
+            version: "2.1.0".into(),
+            model: Some("claude-opus-4-8".into()),
+            state: SessionState::Running,
+            started_at: Some(0),
+            last_activity: Some(9_000),
+            tokens: TokenLedger {
+                input: 4000,
+                output: 8000,
+                cache_write: 2000,
+                cache_read: 180_000,
+                messages: 12,
+                ..Default::default()
+            },
+            tokens_per_min: 62_000.0,
+            cpu_pct: 34.0,
+            rss_mb: 420,
+            agents,
+            tasks: vec![Task {
+                subject: "do the thing".into(),
+                status: "in_progress".into(),
+                blocked: false,
+                active_form: None,
+            }],
+            watchers: vec![Watcher {
+                kind: WatcherKind::Loop,
+                name: "ScheduleWakeup".into(),
+                detail: "babysit".into(),
+                schedule: Some("self-paced".into()),
+                last_fired: Some(5000),
+                fired_count: 8,
+                next_wake: Some(20_000),
+                running: true,
+                pid: None,
+            }],
+            host: Host::Local,
+        }
+    }
+
+    pub fn snapshot(sessions: Vec<Session>) -> Snapshot {
+        let active = sessions.len();
+        Snapshot {
+            generated_at: 10_000,
+            sessions,
+            alerts: vec![Alert {
+                severity: Severity::Critical,
+                kind: AlertKind::RunawayLoop,
+                subject: "webapp".into(),
+                session_id: "s1".into(),
+                message: "62k tok/min · no user turn 7m".into(),
+                since_ms: 0,
+            }],
+            totals: Totals {
+                active_sessions: active,
+                tokens_per_min: 62_000.0,
+                total_tokens: 194_000,
+                cache_hit_pct: 92.0,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+    use ccwatch_core::model::SessionState;
+
+    fn app_with(snap: Snapshot) -> App {
+        let mut a = App::new(10_000);
+        a.set_snapshot(snap);
+        a
+    }
+
+    #[test]
+    fn navigation_and_expand_reveal_agents() {
+        let snap = snapshot(vec![session(
+            "s1",
+            "webapp",
+            vec![agent("a1", "search dir", vec![agent("a2", "sub-scan", vec![])])],
+        )]);
+        let mut app = app_with(snap);
+        // Only the session row is visible initially.
+        assert_eq!(app.visible_rows().len(), 1);
+        // Expand the session → its agent appears.
+        app.toggle_expand();
+        assert_eq!(app.visible_rows().len(), 2);
+        // Move to the agent and expand → nested child appears.
+        app.move_selection(1);
+        app.toggle_expand();
+        assert_eq!(app.visible_rows().len(), 3);
+        assert_eq!(app.visible_rows()[2].key, "a2");
+    }
+
+    #[test]
+    fn fuzzy_matches_across_entities_and_jumps() {
+        let snap = snapshot(vec![session(
+            "s1",
+            "webapp",
+            vec![agent("a1", "search dir", vec![])],
+        )]);
+        let mut app = app_with(snap);
+        app.open_fuzzy();
+        for c in "search".chars() {
+            app.fuzzy_input(c);
+        }
+        // Top result should be the agent whose description matches.
+        if let Mode::Fuzzy { results, .. } = &app.mode {
+            assert!(results.iter().any(|r| r.kind == "agent"));
+            assert_eq!(results[0].kind, "agent");
+        } else {
+            panic!("not in fuzzy mode");
+        }
+        app.fuzzy_commit();
+        // Jump expanded the session and selected the agent row.
+        assert!(app.expanded.contains("s1"));
+        assert_eq!(app.selected_row().unwrap().key, "a1");
+    }
+
+    #[test]
+    fn stage_kill_enters_confirm_with_pid() {
+        let snap = snapshot(vec![session("s1", "webapp", vec![])]);
+        let mut app = app_with(snap);
+        app.stage_action(ActionKind::Kill);
+        match app.take_pending() {
+            Some(ccwatch_core::ipc::ActionRequest::KillSession { pid }) => assert_eq!(pid, 4242),
+            other => panic!("expected KillSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hide_idle_filters_sessions() {
+        let mut idle = session("s2", "sleepy", vec![]);
+        idle.state = SessionState::Idle;
+        let snap = snapshot(vec![session("s1", "busy", vec![]), idle]);
+        let mut app = app_with(snap);
+        assert_eq!(app.sessions().len(), 2);
+        app.hide_idle = true;
+        assert_eq!(app.sessions().len(), 1);
+        assert_eq!(app.sessions()[0].1.name, "busy");
+    }
+}
