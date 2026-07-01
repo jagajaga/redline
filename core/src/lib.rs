@@ -9,6 +9,7 @@ pub mod actions;
 pub mod collectors;
 pub mod config;
 pub mod engine;
+pub mod governor;
 pub mod ipc;
 pub mod leaks;
 pub mod model;

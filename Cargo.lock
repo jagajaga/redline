@@ -190,6 +190,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ccwatch-core",
+ "chrono",
  "serde",
  "serde_json",
  "tao",

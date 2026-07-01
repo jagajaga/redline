@@ -38,16 +38,42 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
+/// Governor segment for the top bar: "▲2.1× wall 49m" / "▼0.6×".
+fn governor_segment(app: &App) -> String {
+    let Some(g) = &app.snapshot.governor else {
+        return String::new();
+    };
+    let w = &g.window;
+    let Some(delta) = g.primary_delta() else {
+        return String::new();
+    };
+    let arrow = if delta.is_infinite() {
+        return " · ⛔ tank empty".to_string();
+    } else if delta >= 1.0 {
+        format!("▲{delta:.1}×")
+    } else {
+        format!("▼{delta:.1}×")
+    };
+    match w.wall_at {
+        Some(wall) => format!(
+            " · {arrow} wall {}",
+            format::duration_ms(wall - app.now_ms)
+        ),
+        None => format!(" · {arrow}"),
+    }
+}
+
 fn draw_topbar(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.snapshot.totals;
     let conn = if app.connected { "●" } else { "○ disconnected" };
     let text = format!(
-        " ccwatch  {conn}  {} · {} active · {} tok/min · Σ {} · cache {:.0}%",
+        " ccwatch  {conn}  {} · {} active · {} tok/min · Σ {} · cache {:.0}%{}",
         host_breakdown(app),
         t.active_sessions,
         format::rate(t.tokens_per_min),
         format::tokens(t.total_tokens),
         t.cache_hit_pct,
+        governor_segment(app),
     );
     let style = if app.connected {
         Style::default().fg(Color::Black).bg(Color::Cyan)
@@ -816,6 +842,29 @@ mod tests {
         // Top-bar breakdown lists both hosts, and the remote row is tagged.
         assert!(s.contains("local 1"), "breakdown missing local:\n{s}");
         assert!(s.contains("demo-host"), "remote host tag/breakdown missing:\n{s}");
+    }
+
+    #[test]
+    fn topbar_shows_governor_delta_and_wall() {
+        use ccwatch_core::model::{BudgetSource, GovernorStatus, Tank};
+        let mut snap = snapshot(vec![session("s1", "webapp", vec![])]);
+        let tank = Tank {
+            used: 500_000,
+            budget: Some(1_000_000),
+            budget_source: BudgetSource::Config,
+            window_start: 0,
+            resets_at: Some(10_000_000 + 3 * 3_600_000),
+            rate_per_min: 10_000.0,
+            cruise_per_min: Some(2_778.0),
+            delta: Some(3.6),
+            range_min: Some(50.0),
+            wall_at: Some(10_000 + 50 * 60_000),
+        };
+        snap.governor = Some(GovernorStatus { window: tank, cruise: tank });
+        let app = app_with(snap);
+        let s = render(&app);
+        assert!(s.contains("▲3.6×"), "delta missing from top bar:\n{s}");
+        assert!(s.contains("wall"), "wall countdown missing:\n{s}");
     }
 
     #[test]

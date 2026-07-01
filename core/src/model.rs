@@ -169,6 +169,9 @@ pub enum AlertKind {
     /// A configured remote host failed its last fetch — instead of silently
     /// vanishing from the dashboard, it surfaces here.
     RemoteDown,
+    /// At the current burn rate the plan-window budget runs out **before** the
+    /// window resets ("you'll hit the wall at 16:12").
+    BudgetWall,
 }
 
 impl AlertKind {
@@ -180,7 +183,59 @@ impl AlertKind {
             AlertKind::AgentStorm => "agent storm",
             AlertKind::StuckWatcher => "stuck watcher",
             AlertKind::RemoteDown => "remote down",
+            AlertKind::BudgetWall => "limit ahead",
         }
+    }
+}
+
+/// Where a tank's budget number came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetSource {
+    /// Set by the user in config.
+    Config,
+    /// Learned from observed 429 rate-limit events (an estimate).
+    Learned,
+    /// No budget known — usage-only display.
+    Unknown,
+}
+
+/// One fuel tank: either the plan window (5h block) or the rolling cruise
+/// budget (1h). All token figures are billable (input + output + cache-write).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Tank {
+    /// Billable tokens consumed in this window, across every host.
+    pub used: u64,
+    pub budget: Option<u64>,
+    pub budget_source: BudgetSource,
+    /// Epoch ms the window started (plan tank) / the rolling span start.
+    pub window_start: i64,
+    /// Epoch ms the tank refills (plan tank only; None for rolling cruise).
+    pub resets_at: Option<i64>,
+    /// Current account-wide burn, billable tokens/min over the last 5 min.
+    pub rate_per_min: f64,
+    /// The pace that lands exactly at the reset: (budget−used)/time-left.
+    pub cruise_per_min: Option<f64>,
+    /// Throttle: rate / cruise. >1 = you'll hit the wall before the reset.
+    pub delta: Option<f64>,
+    /// Minutes until empty at the current rate.
+    pub range_min: Option<f64>,
+    /// Epoch ms when the wall is hit, if that's before the reset.
+    pub wall_at: Option<i64>,
+}
+
+/// The Governor: fuel-gauge readouts for the plan window and cruise budget.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct GovernorStatus {
+    pub window: Tank,
+    pub cruise: Tank,
+}
+
+impl GovernorStatus {
+    /// The single number for the menu bar: the plan-window delta when a budget
+    /// is known, else the cruise delta.
+    pub fn primary_delta(&self) -> Option<f64> {
+        self.window.delta.or(self.cruise.delta)
     }
 }
 
@@ -244,6 +299,14 @@ pub struct Snapshot {
     pub sessions: Vec<Session>,
     pub alerts: Vec<Alert>,
     pub totals: Totals,
+    /// Billable usage as `(5-min bucket epoch ms, billable tokens)` pairs over
+    /// the recent governor horizon. Remote probes emit these so account-wide
+    /// usage can be integrated with a proper window anchor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage_buckets: Vec<(i64, u64)>,
+    /// Fuel-gauge readouts; computed by the daemon after merging all hosts.
+    #[serde(default)]
+    pub governor: Option<GovernorStatus>,
 }
 
 impl Snapshot {
@@ -253,6 +316,8 @@ impl Snapshot {
             sessions: Vec::new(),
             alerts: Vec::new(),
             totals: Totals::default(),
+            usage_buckets: Vec::new(),
+            governor: None,
         }
     }
 }

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Config {
     /// A session with no activity for longer than this is `Idle`.
     pub idle_secs: i64,
@@ -24,6 +24,14 @@ pub struct Config {
     pub agent_storm_window_secs: i64,
     /// How long parsed transcript events are retained for rate windows.
     pub history_retain_secs: i64,
+    /// Governor: plan-window length (Anthropic's session window is 5h).
+    pub governor_window_hours: i64,
+    /// Governor: plan-window budget in billable tokens. None → learned/unknown.
+    pub governor_window_budget: Option<u64>,
+    /// Governor: self-set rolling hourly budget in billable tokens.
+    pub governor_hourly_budget: Option<u64>,
+    /// Terminal app for "Open TUI dashboard" (empty → auto-detect).
+    pub terminal_app: String,
 }
 
 impl Default for Config {
@@ -38,7 +46,20 @@ impl Default for Config {
             agent_storm_count: 6,
             agent_storm_window_secs: 60,
             history_retain_secs: 1800,
+            governor_window_hours: 5,
+            governor_window_budget: None,
+            governor_hourly_budget: None,
+            terminal_app: String::new(),
         }
+    }
+}
+
+impl Config {
+    /// Event retention must cover the governor's window plus slack, whatever
+    /// the rate-window retention is set to.
+    pub fn retention_secs(&self) -> i64 {
+        self.history_retain_secs
+            .max(self.governor_window_hours * 3600 + 3600)
     }
 }
 
@@ -72,6 +93,20 @@ impl Config {
                 "agent_storm_count" => set_usize(&mut cfg.agent_storm_count, v),
                 "agent_storm_window_secs" => set_i64(&mut cfg.agent_storm_window_secs, v),
                 "history_retain_secs" => set_i64(&mut cfg.history_retain_secs, v),
+                "governor_window_hours" | "window_hours" => {
+                    set_i64(&mut cfg.governor_window_hours, v)
+                }
+                "governor_window_budget" | "window_budget" => {
+                    if let Ok(n) = v.replace('_', "").parse() {
+                        cfg.governor_window_budget = Some(n);
+                    }
+                }
+                "governor_hourly_budget" | "hourly_budget" => {
+                    if let Ok(n) = v.replace('_', "").parse() {
+                        cfg.governor_hourly_budget = Some(n);
+                    }
+                }
+                "terminal_app" | "terminal" => cfg.terminal_app = v.to_string(),
                 _ => {}
             }
         }

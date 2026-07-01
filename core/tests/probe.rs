@@ -110,5 +110,11 @@ fn probe_emits_valid_snapshot() {
     assert_eq!(snap.totals.active_sessions, 1);
     assert!(snap.totals.cache_hit_pct > 90.0);
 
+    // Governor usage buckets: all three messages are within the 6h horizon;
+    // billable per message = 100 + out + 50.
+    let bucket_sum: u64 = snap.usage_buckets.iter().map(|(_, v)| v).sum();
+    assert_eq!(bucket_sum, 300 + 10_000 + 150, "buckets carry billable tokens");
+    assert!(snap.usage_buckets.windows(2).all(|w| w[0].0 < w[1].0), "buckets sorted");
+
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -26,17 +26,87 @@ fn host_label(h: &Host) -> String {
     }
 }
 
-/// Menu-bar text next to the graph. Alerts dominate; otherwise the current
-/// total burn rate. `None` connection state shows a clear "off" marker.
+/// Format a cruise delta: `▲2.1×` above cruise, `▼0.6×` below, `⛔` when the
+/// tank is empty and still burning.
+pub fn delta_str(delta: f64) -> String {
+    if delta.is_infinite() {
+        "⛔".to_string()
+    } else if delta >= 1.0 {
+        format!("▲{delta:.1}×")
+    } else {
+        format!("▼{delta:.1}×")
+    }
+}
+
+fn clock(ms: i64) -> String {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_millis_opt(ms).single() {
+        Some(dt) => dt.format("%H:%M").to_string(),
+        None => "--:--".into(),
+    }
+}
+
+fn mins(m: f64) -> String {
+    if m >= 60.0 {
+        format!("{}h{:02}m", (m as i64) / 60, (m as i64) % 60)
+    } else {
+        format!("{m:.0}m")
+    }
+}
+
+/// Menu-bar text next to the graph. Alerts dominate; then the governor's
+/// cruise delta (the throttle readout); then the raw burn rate. `⏻` when the
+/// daemon is unreachable.
 pub fn tray_title(s: &Snapshot, connected: bool) -> String {
     if !connected {
         return "⏻".to_string();
     }
     if !s.alerts.is_empty() {
-        format!("⚠{}", s.alerts.len())
-    } else {
-        rate(s.totals.tokens_per_min)
+        return format!("⚠{}", s.alerts.len());
     }
+    if let Some(delta) = s.governor.as_ref().and_then(|g| g.primary_delta()) {
+        return delta_str(delta);
+    }
+    rate(s.totals.tokens_per_min)
+}
+
+/// The governor line for the dropdown: throttle, range, tank, reset.
+pub fn governor_line(s: &Snapshot) -> String {
+    let Some(g) = &s.governor else {
+        return "governor: no data".into();
+    };
+    let w = &g.window;
+    let mut parts = Vec::new();
+    match w.delta {
+        Some(d) => parts.push(format!("throttle {}", delta_str(d))),
+        None => parts.push(format!("burn {}/min", rate(w.rate_per_min))),
+    }
+    if let Some(r) = w.range_min {
+        parts.push(format!("range {}", mins(r)));
+    }
+    if let (Some(b), used) = (w.budget, w.used) {
+        let pct = 100.0 - (used as f64 / b as f64 * 100.0).min(100.0);
+        let tag = if w.budget_source == ccwatch_core::model::BudgetSource::Learned {
+            "~"
+        } else {
+            ""
+        };
+        parts.push(format!("tank {tag}{pct:.0}%"));
+    } else {
+        parts.push(format!("used {}", tokens(w.used)));
+    }
+    if let Some(reset) = w.resets_at {
+        parts.push(format!("reset {}", clock(reset)));
+    }
+    if let (Some(b), Some(d)) = (g.cruise.budget, g.cruise.delta) {
+        parts.push(format!(
+            "hour {}/{} {}",
+            tokens(g.cruise.used),
+            tokens(b),
+            delta_str(d)
+        ));
+    }
+    parts.join(" · ")
 }
 
 pub fn tooltip(s: &Snapshot) -> String {
@@ -337,6 +407,75 @@ mod tests {
         assert_eq!(m.alerts.len(), 1);
         assert!(m.alerts[0].contains("cache bleed"));
         assert!(m.alerts[0].contains("worker"));
+    }
+
+    #[test]
+    fn tray_title_prefers_governor_delta() {
+        let mut s = base();
+        let tank = Tank {
+            used: 500_000,
+            budget: Some(1_000_000),
+            budget_source: BudgetSource::Config,
+            window_start: 0,
+            resets_at: Some(10_800_000),
+            rate_per_min: 10_000.0,
+            cruise_per_min: Some(2_778.0),
+            delta: Some(3.6),
+            range_min: Some(50.0),
+            wall_at: Some(3_000_000),
+        };
+        s.governor = Some(GovernorStatus { window: tank, cruise: tank });
+        assert_eq!(tray_title(&s, true), "▲3.6×");
+        // Alerts still win.
+        s.alerts.push(Alert {
+            severity: Severity::Critical,
+            kind: AlertKind::BudgetWall,
+            subject: "plan window".into(),
+            session_id: String::new(),
+            message: "wall".into(),
+            since_ms: 0,
+        });
+        assert_eq!(tray_title(&s, true), "⚠1");
+    }
+
+    #[test]
+    fn governor_line_reads_like_a_gauge() {
+        let mut s = base();
+        let mut tank = Tank {
+            used: 620_000,
+            budget: Some(1_000_000),
+            budget_source: BudgetSource::Learned,
+            window_start: 0,
+            resets_at: Some(1_000_000_000),
+            rate_per_min: 10_000.0,
+            cruise_per_min: Some(5_000.0),
+            delta: Some(2.0),
+            range_min: Some(98.0),
+            wall_at: Some(999_999),
+        };
+        let cruise = {
+            tank.budget = Some(300_000);
+            tank.used = 150_000;
+            tank.delta = Some(0.5);
+            tank
+        };
+        let mut window = tank;
+        window.budget = Some(1_000_000);
+        window.used = 620_000;
+        window.delta = Some(2.0);
+        s.governor = Some(GovernorStatus { window, cruise });
+        let line = governor_line(&s);
+        assert!(line.contains("throttle ▲2.0×"), "{line}");
+        assert!(line.contains("range 1h38m"), "{line}");
+        assert!(line.contains("tank ~38%"), "learned budgets marked ~: {line}");
+        assert!(line.contains("hour 150k/300k ▼0.5×"), "{line}");
+    }
+
+    #[test]
+    fn delta_formats() {
+        assert_eq!(delta_str(2.14), "▲2.1×");
+        assert_eq!(delta_str(0.6), "▼0.6×");
+        assert_eq!(delta_str(f64::INFINITY), "⛔");
     }
 
     #[test]

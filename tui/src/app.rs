@@ -505,6 +505,8 @@ pub(crate) mod test_support {
                 total_tokens: 194_000,
                 cache_hit_pct: 92.0,
             },
+            usage_buckets: Vec::new(),
+            governor: None,
         }
     }
 }

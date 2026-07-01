@@ -229,11 +229,20 @@ pub fn merge(local: Snapshot, remotes: &[Snapshot]) -> Snapshot {
         },
     };
 
+    // Combine usage buckets across hosts — limits are per account, so remote
+    // burn draws from the same tank.
+    let bucket_lists: Vec<&[(i64, u64)]> = std::iter::once(&local.usage_buckets[..])
+        .chain(remotes.iter().map(|r| &r.usage_buckets[..]))
+        .collect();
+    let usage_buckets = crate::governor::merge_buckets(&bucket_lists);
+
     Snapshot {
         generated_at: local.generated_at,
         sessions,
         alerts,
         totals,
+        usage_buckets,
+        governor: None,
     }
 }
 

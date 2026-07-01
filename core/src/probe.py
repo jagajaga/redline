@@ -23,6 +23,11 @@ NOW_MS = int(time.time() * 1000)
 WINDOW_MS = 5 * 60 * 1000   # rate window, matches core default
 IDLE_MS = 120 * 1000        # idle threshold, matches core default
 MAX_TAIL = 16 * 1024 * 1024  # cap transcript read for huge histories
+BUCKET_MS = 5 * 60 * 1000    # governor usage buckets
+HORIZON_MS = 6 * 3600 * 1000  # how far back buckets are reported
+
+# bucket_ts -> billable tokens, fed by every transcript scan
+USAGE_BUCKETS = {}
 
 
 def alive(pid):
@@ -102,12 +107,16 @@ def scan_transcript(path):
             ts = parse_ts(d.get("timestamp") or "")
             if ts:
                 last_act = max(last_act or 0, ts)
+                billable = (
+                    g("input_tokens")
+                    + g("output_tokens")
+                    + g("cache_creation_input_tokens")
+                )
                 if ts >= NOW_MS - WINDOW_MS:
-                    window_billable += (
-                        g("input_tokens")
-                        + g("output_tokens")
-                        + g("cache_creation_input_tokens")
-                    )
+                    window_billable += billable
+                if ts >= NOW_MS - HORIZON_MS:
+                    bucket = ts - (ts % BUCKET_MS)
+                    USAGE_BUCKETS[bucket] = USAGE_BUCKETS.get(bucket, 0) + billable
         fh.close()
     except Exception:
         pass
@@ -195,6 +204,7 @@ print(json.dumps({
     "generated_at": NOW_MS,
     "sessions": sessions,
     "alerts": [],
+    "usage_buckets": sorted(USAGE_BUCKETS.items()),
     "totals": {
         "active_sessions": len(sessions),
         "tokens_per_min": sum(s["tokens_per_min"] for s in sessions),

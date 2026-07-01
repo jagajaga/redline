@@ -26,6 +26,7 @@ fn main() -> anyhow::Result<()> {
         let model = summary::menu_model(&snap);
         println!("title:   {}", summary::tray_title(&snap, true));
         println!("tooltip: {}", summary::tooltip(&snap));
+        println!("gov:     {}", summary::governor_line(&snap));
         let rates: Vec<f64> = snap.sessions.iter().map(|s| s.tokens_per_min).collect();
         println!("load:    {}  (per-session tok/min)", graph::unicode_spark(&rates));
         println!("menu:");
@@ -152,22 +153,25 @@ mod macos {
     struct TrayMenu {
         menu: Menu,
         header: MenuItem,
+        governor: MenuItem,
         alerts: Vec<MenuItem>,
         sessions: Vec<SessionRow>,
         open_tui: MenuItem,
         quit: MenuItem,
     }
 
-    /// Index of the first dynamic row (after header + separator).
-    const DYN_BASE: usize = 2;
+    /// Index of the first dynamic row (after header + governor + separator).
+    const DYN_BASE: usize = 3;
 
     impl TrayMenu {
         fn new() -> Self {
             let menu = Menu::new();
             let header = MenuItem::new("connecting…", false, None);
+            let governor = MenuItem::new("governor: no data", false, None);
             let open_tui = MenuItem::new("Open TUI dashboard", true, None);
             let quit = MenuItem::new("Quit ccwatch", true, None);
             let _ = menu.append(&header);
+            let _ = menu.append(&governor);
             let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&open_tui);
@@ -175,6 +179,7 @@ mod macos {
             TrayMenu {
                 menu,
                 header,
+                governor,
                 alerts: Vec::new(),
                 sessions: Vec::new(),
                 open_tui,
@@ -288,13 +293,27 @@ mod macos {
         });
     }
 
-    fn open_tui() {
+    /// The user's terminal: config override first, then the first installed
+    /// of the common terminals, then macOS Terminal.
+    fn terminal_app(configured: &str) -> String {
+        if !configured.is_empty() {
+            return configured.to_string();
+        }
+        for candidate in ["iTerm", "Ghostty", "WezTerm", "Warp", "Alacritty", "kitty"] {
+            if std::path::Path::new(&format!("/Applications/{candidate}.app")).exists() {
+                return candidate.to_string();
+            }
+        }
+        "Terminal".to_string()
+    }
+
+    fn open_tui(terminal: &str) {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 let tui = dir.join("ccwatch");
                 if tui.exists() {
                     let _ = std::process::Command::new("/usr/bin/open")
-                        .args(["-a", "Terminal"])
+                        .args(["-a", terminal])
                         .arg(tui)
                         .spawn();
                     return;
@@ -308,7 +327,9 @@ mod macos {
         let _ = client::ensure_daemon(paths);
         let mut rx: Option<Receiver<ccwatch_core::model::Snapshot>> =
             client::subscribe(paths).ok();
-        let burn = Config::load(&paths.config_file()).burn_tokens_per_min;
+        let cfg = Config::load(&paths.config_file());
+        let burn = cfg.burn_tokens_per_min;
+        let terminal = terminal_app(&cfg.terminal_app);
 
         let event_loop = EventLoopBuilder::new().build();
         let mut tray_menu = TrayMenu::new();
@@ -392,6 +413,7 @@ mod macos {
                 }
                 tray.set_title(Some(summary::tray_title(&snap, true)));
                 let _ = tray.set_tooltip(Some(summary::tooltip(&snap)));
+                tray_menu.governor.set_text(summary::governor_line(&snap));
                 actions = tray_menu.apply(&model, &|entry| {
                     let hist = session_hist.get(&entry.id)?;
                     let rgba = graph::render_spark(&hist.values(), burn);
@@ -403,7 +425,7 @@ mod macos {
             while let Ok(ev) = menu_channel.try_recv() {
                 match actions.get(&ev.id).cloned() {
                     Some(Action::Quit) => *control_flow = ControlFlow::Exit,
-                    Some(Action::OpenTui) => open_tui(),
+                    Some(Action::OpenTui) => open_tui(&terminal),
                     Some(Action::Pause { pid, name }) => {
                         let (ok, msg) =
                             client::send_action(&paths, ActionRequest::PauseSession { pid });

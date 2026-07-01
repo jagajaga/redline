@@ -41,6 +41,8 @@ pub enum TranscriptEvent {
         delay_secs: Option<i64>,
         reason: Option<String>,
     },
+    /// An API 429 — a rate-limit hit, used to calibrate the plan-window budget.
+    RateLimited { ts_ms: Option<i64> },
 }
 
 /// Parse one transcript line into zero or more events.
@@ -59,6 +61,11 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
         .unwrap_or(false);
     let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
     let mut out = Vec::new();
+
+    // Rate-limit hits are recorded on error-carrier lines of various types.
+    if v.get("apiErrorStatus").and_then(Value::as_i64) == Some(429) {
+        out.push(TranscriptEvent::RateLimited { ts_ms });
+    }
 
     match ty {
         "assistant" => {
@@ -261,5 +268,18 @@ mod tests {
     fn malformed_line_yields_nothing() {
         assert!(parse_line("{not json").is_empty());
         assert!(parse_line("").is_empty());
+    }
+
+    #[test]
+    fn detects_rate_limit_events() {
+        let line = r#"{"type":"assistant","timestamp":"2026-05-25T12:00:00.000Z","apiErrorStatus":429,"isApiErrorMessage":true,"message":{"content":"rate limited"}}"#;
+        assert!(parse_line(line)
+            .iter()
+            .any(|e| matches!(e, TranscriptEvent::RateLimited { ts_ms: Some(_) })));
+        // Other statuses are not rate limits.
+        let line = r#"{"type":"assistant","apiErrorStatus":500,"message":{}}"#;
+        assert!(!parse_line(line)
+            .iter()
+            .any(|e| matches!(e, TranscriptEvent::RateLimited { .. })));
     }
 }

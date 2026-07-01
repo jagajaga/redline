@@ -79,14 +79,17 @@ fn main() -> anyhow::Result<()> {
     let _watcher = spawn_fs_watcher(&paths, tick_tx.clone());
 
     // Refresher thread owns the engine and merges cached remote snapshots.
-    // Failing remotes surface as RemoteDown alerts rather than vanishing.
+    // Failing remotes surface as RemoteDown alerts rather than vanishing, and
+    // the Governor (fuel gauge) is computed over the merged account-wide usage.
     {
         let shared = shared.clone();
         let config = Config::load(&paths.config_file());
         let paths2 = paths.clone();
         let remote_cache = remote_cache.clone();
         let remote_errors = manager.errors();
-        let build = move |engine: &mut Engine| {
+        let learned_path = paths.ccwatch_dir().join("learned.json");
+        let mut learned: Option<u64> = load_learned(&learned_path);
+        let mut build = move |engine: &mut Engine| {
             let local = engine.refresh_now();
             let remotes = remote_cache.read().unwrap().clone();
             let mut snap = remote::merge(local, &remotes);
@@ -100,10 +103,37 @@ fn main() -> anyhow::Result<()> {
                     since_ms: snap.generated_at,
                 });
             }
+
+            // Governor: calibrate the ceiling from observed 429s, then compute.
+            let window_ms = config.governor_window_hours * 3_600_000;
+            if let Some(est) = ccwatch_core::governor::learn_budget(
+                &snap.usage_buckets,
+                &engine.rate_limit_ts(),
+                window_ms,
+            ) {
+                if learned.map(|l| est > l).unwrap_or(true) {
+                    learned = Some(est);
+                    let _ = std::fs::write(
+                        &learned_path,
+                        format!("{{\"window_budget_learned\":{est}}}"),
+                    );
+                }
+            }
+            let g = ccwatch_core::governor::compute(
+                &snap.usage_buckets,
+                snap.generated_at,
+                &config,
+                learned,
+            );
+            if let Some(alert) = ccwatch_core::governor::wall_alert(&g, snap.generated_at) {
+                snap.alerts.push(alert);
+            }
+            snap.governor = Some(g);
             snap
         };
+        let engine_config = Config::load(&paths.config_file());
         std::thread::spawn(move || {
-            let mut engine = Engine::new(paths2, config);
+            let mut engine = Engine::new(paths2, engine_config);
             // Prime immediately so early subscribers get real data.
             *shared.write().unwrap() = Arc::new(build(&mut engine));
             for _ in tick_rx {
@@ -305,6 +335,15 @@ fn send(writer: &mut UnixStream, msg: &ServerMsg) -> std::io::Result<()> {
     line.push('\n');
     writer.write_all(line.as_bytes())?;
     writer.flush()
+}
+
+/// Read the persisted learned window budget (`{"window_budget_learned":N}`).
+fn load_learned(path: &std::path::Path) -> Option<u64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get("window_budget_learned")?
+        .as_u64()
 }
 
 fn read_pidfile(paths: &Paths) -> Option<i32> {

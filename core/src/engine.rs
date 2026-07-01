@@ -135,6 +135,8 @@ pub struct Engine {
     probe: ProcessProbe,
     watermarks: HashMap<PathBuf, u64>,
     accums: HashMap<String, SessionAccum>,
+    /// Timestamps of observed 429 rate-limit events (pruned to retention).
+    rate_limits: VecDeque<i64>,
 }
 
 impl Engine {
@@ -145,7 +147,13 @@ impl Engine {
             probe: ProcessProbe::new(),
             watermarks: HashMap::new(),
             accums: HashMap::new(),
+            rate_limits: VecDeque::new(),
         }
+    }
+
+    /// Observed 429 timestamps within retention (for budget learning).
+    pub fn rate_limit_ts(&self) -> Vec<i64> {
+        self.rate_limits.iter().copied().collect()
     }
 
     pub fn with_defaults() -> Self {
@@ -181,6 +189,37 @@ impl Engine {
             }
         }
 
+        // Also ingest recently-modified transcripts of sessions that no longer
+        // exist — their burn still counts against the account's plan window.
+        let known: std::collections::HashSet<&str> =
+            metas.iter().map(|m| m.session_id.as_str()).collect();
+        let retention_ms = self.config.retention_secs() * 1000;
+        let recent: Vec<(String, PathBuf)> = transcript_index
+            .iter()
+            .filter(|(sid, path)| {
+                !known.contains(sid.as_str())
+                    && std::fs::metadata(path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .map(|age| (age.as_millis() as i64) < retention_ms)
+                        .unwrap_or(false)
+            })
+            .map(|(sid, path)| (sid.clone(), path.clone()))
+            .collect();
+        for (sid, path) in recent {
+            self.ingest_transcript(&sid, path);
+        }
+
+        // Prune stale rate-limit events.
+        while let Some(&front) = self.rate_limits.front() {
+            if front < now_ms - retention_ms {
+                self.rate_limits.pop_front();
+            } else {
+                break;
+            }
+        }
+
         let mut out_sessions = Vec::new();
         let mut alerts = Vec::new();
 
@@ -195,7 +234,7 @@ impl Engine {
             // Ensure an accumulator exists even with no transcript yet.
             self.accums.entry(session_id.clone()).or_default();
             let accum = self.accums.get_mut(&session_id).unwrap();
-            accum.prune(now_ms, self.config.history_retain_secs);
+            accum.prune(now_ms, self.config.retention_secs());
 
             let (win_total, win_input, win_cache_read) =
                 accum.window_sum(now_ms, self.config.rate_window_secs);
@@ -327,11 +366,29 @@ impl Engine {
         alerts.sort_by_key(|a| std::cmp::Reverse(a.severity));
 
         let totals = compute_totals(&out_sessions);
+
+        // Billable usage buckets across ALL accumulators (including ended
+        // sessions) — the governor's raw fuel data. Prune ended-session accums
+        // here since the display loop above only prunes live ones.
+        for accum in self.accums.values_mut() {
+            accum.prune(now_ms, self.config.retention_secs());
+        }
+        let mut bucket_map: std::collections::BTreeMap<i64, u64> = Default::default();
+        for accum in self.accums.values() {
+            for e in &accum.events {
+                *bucket_map
+                    .entry(crate::governor::bucket_of(e.ts_ms))
+                    .or_insert(0) += e.total;
+            }
+        }
+
         Snapshot {
             generated_at: now_ms,
             sessions: out_sessions,
             alerts,
             totals,
+            usage_buckets: bucket_map.into_iter().collect(),
+            governor: None,
         }
     }
 
@@ -473,6 +530,11 @@ impl Engine {
                     }
                     TranscriptEvent::ToolResult { tool_use_id } => {
                         accum.finish_agent(&tool_use_id);
+                    }
+                    TranscriptEvent::RateLimited { ts_ms } => {
+                        if let Some(ts) = ts_ms {
+                            self.rate_limits.push_back(ts);
+                        }
                     }
                     TranscriptEvent::ScheduleWakeup {
                         ts_ms,
