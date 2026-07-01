@@ -35,6 +35,7 @@ fn main() -> anyhow::Result<()> {
         }
         for s in &model.sessions {
             println!("  ▸ {}", s.title);
+            println!("      ∿ {}", s.tokens_line);
             for i in &s.info {
                 println!("      {i}");
             }
@@ -60,7 +61,10 @@ mod macos {
     use std::sync::mpsc::{Receiver, TryRecvError};
     use std::time::{Duration, Instant};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+    use tray_icon::menu::{
+        Icon as MenuIcon, IconMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem,
+        Submenu,
+    };
     use tray_icon::TrayIconBuilder;
 
     /// Minimum spacing between graph samples, so the ~45 s window is stable
@@ -79,22 +83,25 @@ mod macos {
         Cancel { remote: String, id: String, name: String },
     }
 
-    /// The live menu items for one session's submenu.
+    /// The live menu items for one session's submenu. The first row is an
+    /// iStat-style area sparkline of that session's burn with the token
+    /// breakdown beside it.
     struct SessionRow {
         submenu: Submenu,
-        info: [MenuItem; 3],
+        spark: IconMenuItem,
+        info: [MenuItem; 2],
         pause: MenuItem,
         resume: MenuItem,
         kill: MenuItem,
     }
 
     impl SessionRow {
-        fn new(entry: &summary::SessionEntry) -> Self {
+        fn new(entry: &summary::SessionEntry, icon: Option<MenuIcon>) -> Self {
             let submenu = Submenu::new(&entry.title, true);
+            let spark = IconMenuItem::new(&entry.tokens_line, true, icon, None);
             let info = [
                 MenuItem::new(&entry.info[0], false, None),
                 MenuItem::new(&entry.info[1], false, None),
-                MenuItem::new(&entry.info[2], false, None),
             ];
             let pause = MenuItem::new("Pause (SIGSTOP)", entry.can_pause, None);
             let resume = MenuItem::new("Resume (SIGCONT)", entry.can_pause, None);
@@ -103,6 +110,8 @@ mod macos {
                 entry.action != summary::SessionAction::None,
                 None,
             );
+            let _ = submenu.append(&spark);
+            let _ = submenu.append(&PredefinedMenuItem::separator());
             for i in &info {
                 let _ = submenu.append(i);
             }
@@ -112,6 +121,7 @@ mod macos {
             let _ = submenu.append(&kill);
             SessionRow {
                 submenu,
+                spark,
                 info,
                 pause,
                 resume,
@@ -119,8 +129,10 @@ mod macos {
             }
         }
 
-        fn update(&self, entry: &summary::SessionEntry) {
+        fn update(&self, entry: &summary::SessionEntry, icon: Option<MenuIcon>) {
             self.submenu.set_text(&entry.title);
+            self.spark.set_text(&entry.tokens_line);
+            self.spark.set_icon(icon);
             for (item, text) in self.info.iter().zip(&entry.info) {
                 item.set_text(text);
             }
@@ -170,7 +182,11 @@ mod macos {
             }
         }
 
-        fn apply(&mut self, model: &summary::MenuModel) -> HashMap<MenuId, Action> {
+        fn apply(
+            &mut self,
+            model: &summary::MenuModel,
+            spark_icon: &dyn Fn(&summary::SessionEntry) -> Option<MenuIcon>,
+        ) -> HashMap<MenuId, Action> {
             self.header.set_text(&model.header);
 
             // Alerts: update in place, then grow/shrink.
@@ -192,10 +208,11 @@ mod macos {
             let base = DYN_BASE + self.alerts.len();
             let common = self.sessions.len().min(model.sessions.len());
             for i in 0..common {
-                self.sessions[i].update(&model.sessions[i]);
+                self.sessions[i].update(&model.sessions[i], spark_icon(&model.sessions[i]));
             }
             for i in self.sessions.len()..model.sessions.len() {
-                let row = SessionRow::new(&model.sessions[i]);
+                let entry = &model.sessions[i];
+                let row = SessionRow::new(entry, spark_icon(entry));
                 let _ = self.menu.insert(&row.submenu, base + i);
                 self.sessions.push(row);
             }
@@ -300,7 +317,9 @@ mod macos {
         actions.insert(tray_menu.open_tui.id().clone(), Action::OpenTui);
 
         let mut history = graph::History::new(graph::SLOTS);
-        let initial = graph::render_rgba(&[], burn);
+        // Per-session sparkline histories, keyed by session id.
+        let mut session_hist: HashMap<String, graph::History> = HashMap::new();
+        let initial = graph::render_tray(&[], burn);
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu.menu.clone()))
             .with_icon(tray_icon::Icon::from_rgba(
@@ -348,10 +367,11 @@ mod macos {
             }
 
             if let Some(snap) = latest {
+                let model = summary::menu_model(&snap);
                 if last_sample.elapsed() >= SAMPLE_EVERY {
                     last_sample = Instant::now();
                     history.push(snap.totals.tokens_per_min);
-                    let rgba = graph::render_rgba(&history.values(), burn);
+                    let rgba = graph::render_tray(&history.values(), burn);
                     if let Ok(icon) = tray_icon::Icon::from_rgba(
                         rgba,
                         graph::ICON_W as u32,
@@ -359,10 +379,24 @@ mod macos {
                     ) {
                         let _ = tray.set_icon(Some(icon));
                     }
+                    // Advance per-session sparkline histories; drop gone sessions.
+                    for entry in &model.sessions {
+                        session_hist
+                            .entry(entry.id.clone())
+                            .or_insert_with(|| graph::History::new(graph::SPARK_SLOTS))
+                            .push(entry.tokens_per_min);
+                    }
+                    let live: std::collections::HashSet<&str> =
+                        model.sessions.iter().map(|e| e.id.as_str()).collect();
+                    session_hist.retain(|id, _| live.contains(id.as_str()));
                 }
                 tray.set_title(Some(summary::tray_title(&snap, true)));
                 let _ = tray.set_tooltip(Some(summary::tooltip(&snap)));
-                actions = tray_menu.apply(&summary::menu_model(&snap));
+                actions = tray_menu.apply(&model, &|entry| {
+                    let hist = session_hist.get(&entry.id)?;
+                    let rgba = graph::render_spark(&hist.values(), burn);
+                    MenuIcon::from_rgba(rgba, graph::SPARK_W as u32, graph::SPARK_H as u32).ok()
+                });
             }
 
             // Menu clicks.

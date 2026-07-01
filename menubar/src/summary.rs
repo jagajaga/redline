@@ -62,8 +62,12 @@ pub enum SessionAction {
 /// One session's dropdown entry: a submenu title, info lines, and its action.
 #[derive(Clone, Debug)]
 pub struct SessionEntry {
+    /// Session id — keys the per-session sparkline history.
+    pub id: String,
     pub title: String,
-    /// Three informational lines shown inside the submenu.
+    /// Text shown beside the sparkline (token breakdown).
+    pub tokens_line: String,
+    /// Informational lines shown inside the submenu.
     pub info: Vec<String>,
     pub name: String,
     pub action: SessionAction,
@@ -71,6 +75,8 @@ pub struct SessionEntry {
     pub kill_label: String,
     /// Pause/resume only make sense for local pids.
     pub can_pause: bool,
+    /// Current burn rate, fed into the sparkline history.
+    pub tokens_per_min: f64,
 }
 
 /// The whole dropdown, as pure data.
@@ -110,6 +116,14 @@ pub fn menu_model(s: &Snapshot) -> MenuModel {
                 SessionState::Ended => "ended",
             };
             let t = &sess.tokens;
+            let tokens_line = format!(
+                "in {} · out {} · cw {} · cr {} · {} msgs",
+                tokens(t.input),
+                tokens(t.output),
+                tokens(t.cache_write),
+                tokens(t.cache_read),
+                t.messages
+            );
             let info = vec![
                 format!(
                     "{state} · {} · cpu {:.0}% · {} MB",
@@ -118,14 +132,6 @@ pub fn menu_model(s: &Snapshot) -> MenuModel {
                     sess.rss_mb
                 ),
                 format!("cwd {}", sess.cwd),
-                format!(
-                    "in {} · out {} · cw {} · cr {} · {} msgs",
-                    tokens(t.input),
-                    tokens(t.output),
-                    tokens(t.cache_write),
-                    tokens(t.cache_read),
-                    t.messages
-                ),
             ];
             let local = matches!(sess.host, Host::Local);
             let (action, kill_label) = if local {
@@ -146,12 +152,15 @@ pub fn menu_model(s: &Snapshot) -> MenuModel {
                 }
             };
             SessionEntry {
+                id: sess.id.clone(),
                 title: format!("{}  —  {} tok/min{host}", sess.name, rate(sess.tokens_per_min)),
+                tokens_line,
                 info,
                 name: sess.name.clone(),
                 action,
                 kill_label,
                 can_pause: local && sess.pid.is_some(),
+                tokens_per_min: sess.tokens_per_min,
             }
         })
         .collect();
@@ -232,7 +241,10 @@ mod tests {
         assert_eq!(e.kill_label, "Kill session…");
         assert!(e.title.contains("webapp"));
         assert!(e.title.contains("40k tok/min"));
-        assert_eq!(e.info.len(), 3);
+        assert_eq!(e.id, "id-webapp");
+        assert_eq!(e.tokens_per_min, 40_000.0);
+        assert!(e.tokens_line.contains("in ") && e.tokens_line.contains("msgs"));
+        assert_eq!(e.info.len(), 2);
         assert!(e.info[0].contains("running"));
         assert!(e.info[0].contains("opus-4-8"));
         assert!(e.info[1].contains("cwd /x"));
