@@ -562,6 +562,11 @@ pub(crate) mod test_support {
                 running: true,
                 pid: None,
             }],
+            activity: vec![ccwatch_core::model::Activity {
+                tool: "Edit".into(),
+                detail: "core/src/engine.rs".into(),
+                since_ms: 5_000,
+            }],
             processes: vec![ccwatch_core::model::ProcInfo {
                 pid: 777,
                 name: "cargo".into(),

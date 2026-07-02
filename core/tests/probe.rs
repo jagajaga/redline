@@ -96,6 +96,16 @@ fn probe_emits_valid_snapshot() {
             "message": {"content": "<task-notification><task-id>t1</task-id><tool-use-id>toolu_bg2</tool-use-id><status>completed</status></task-notification>"}
         })
     ));
+    // An in-flight Edit: tool_use with no tool_result.
+    lines.push_str(&format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": rfc3339(now_ms - 3_000),
+            "message": {"content": [{"type": "tool_use", "id": "toolu_edit", "name": "Edit",
+                "input": {"file_path": "/remote/x.rs", "old_string": "a", "new_string": "b"}}]}
+        })
+    ));
     std::fs::write(proj.join(format!("{sid}.jsonl")), lines).unwrap();
 
     let tasks = root.join("tasks").join(sid);
@@ -159,6 +169,13 @@ fn probe_emits_valid_snapshot() {
 
     // The 429 came through.
     assert_eq!(snap.rate_limits.len(), 1);
+
+    // In-flight tool call (Edit with no result yet) → live activity.
+    assert!(
+        s.activity.iter().any(|a| a.tool == "Edit" && a.detail == "/remote/x.rs"),
+        "in-flight Edit should be activity: {:?}",
+        s.activity
+    );
 
     // Child processes came through (the probe itself is a child of our pid).
     assert!(

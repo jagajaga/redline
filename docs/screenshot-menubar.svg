@@ -99,7 +99,7 @@
 <line x1="374" y1="184" x2="622" y2="184" stroke="#e5e5ea"/>
 <text x="378" y="204" fill="#8e8e93" font-size="12">running · opus-4-8 · cpu 34% · 420 MB</text>
 <text x="378" y="230" fill="#8e8e93" font-size="12">cwd ~/code/webapp</text>
-<text x="378" y="256" fill="#8e8e93" font-size="12">procs 3 · cargo 87% · node 12% · zsh 0%</text>
+<text x="378" y="256" fill="#8e8e93" font-size="12">now · Edit …src/engine.rs · cargo 87% · node 12%</text>
 <line x1="374" y1="274" x2="622" y2="274" stroke="#e5e5ea"/>
 <text x="378" y="294" fill="#1d1d1f" font-size="13">Pause (SIGSTOP)</text>
 <text x="378" y="320" fill="#1d1d1f" font-size="13">Resume (SIGCONT)</text>

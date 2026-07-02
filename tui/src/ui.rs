@@ -441,18 +441,23 @@ fn draw_bottom_split(f: &mut Frame, area: Rect, app: &App) {
         halves[0],
     );
 
-    // Live child processes: what the session is literally running right now.
-    let pcount = session.map(|s| s.processes.len()).unwrap_or(0);
+    // Live work: in-flight tool calls (editing/reading/running — not OS
+    // processes) followed by real child processes.
+    let count = session
+        .map(|s| s.activity.len() + s.processes.len())
+        .unwrap_or(0);
     let pblock = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" PROCESSES ({pcount}) "));
-    let pitems: Vec<ListItem> = session
-        .map(|s| s.processes.iter().map(proc_item).collect())
-        .unwrap_or_default();
+        .title(format!(" ACTIVITY ({count}) "));
+    let mut pitems: Vec<ListItem> = Vec::new();
+    if let Some(s) = session {
+        pitems.extend(s.activity.iter().map(|a| activity_item(a, app.now_ms)));
+        pitems.extend(s.processes.iter().map(proc_item));
+    }
     f.render_widget(
         List::new(if pitems.is_empty() {
             vec![ListItem::new(Span::styled(
-                "no child processes",
+                "no live activity",
                 Style::default().fg(Color::DarkGray),
             ))]
         } else {
@@ -476,6 +481,36 @@ fn draw_bottom_split(f: &mut Frame, area: Rect, app: &App) {
         .block(wblock),
         halves[2],
     );
+}
+
+/// Icon for a tool kind: writing, reading/searching, running, fetching.
+fn tool_icon(tool: &str) -> (&'static str, Color) {
+    match tool {
+        "Edit" | "Write" | "NotebookEdit" => ("✎", Color::Yellow),
+        "Read" | "Grep" | "Glob" => ("⌕", Color::Cyan),
+        "Bash" | "BashOutput" => ("⚙", Color::Green),
+        "WebFetch" | "WebSearch" => ("⇣", Color::Magenta),
+        _ => ("•", Color::Gray),
+    }
+}
+
+fn activity_item(a: &ccwatch_core::model::Activity, now_ms: i64) -> ListItem<'static> {
+    let (icon, color) = tool_icon(&a.tool);
+    // Show the tail of paths/commands — that's the informative end.
+    let detail: String = if a.detail.chars().count() > 34 {
+        format!("…{}", a.detail.chars().rev().take(33).collect::<String>().chars().rev().collect::<String>())
+    } else {
+        a.detail.clone()
+    };
+    ListItem::new(Line::from(vec![
+        Span::styled(format!("{icon} "), Style::default().fg(color)),
+        Span::styled(format!("{:<6}", a.tool), Style::default().fg(color)),
+        Span::raw(format!("{detail} ")),
+        Span::styled(
+            format::ago(a.since_ms, now_ms),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]))
 }
 
 fn proc_item(p: &ccwatch_core::model::ProcInfo) -> ListItem<'static> {
@@ -682,6 +717,12 @@ fn draw_details_popup(f: &mut Frame, area: Rect, app: &App) {
             for w in &s.watchers {
                 kv("watcher", format!("{:?} {} — {}", w.kind, w.name, w.detail));
             }
+            for a in &s.activity {
+                kv("activity", format!(
+                    "{} {} — for {}",
+                    a.tool, a.detail, format::ago(a.since_ms, app.now_ms)
+                ));
+            }
             for p in &s.processes {
                 kv("process", format!(
                     "{} (pid {}) {:.0}% · {} MB · up {} — {}",
@@ -834,7 +875,7 @@ mod tests {
         let s = render(&app);
         for needle in [
             "ccwatch", "active", "ALERTS", "runaway", "webapp", "running", "TASKS", "do the thing",
-            "WATCHERS", "DETAILS", "cache-write", "PROCESSES (1)", "cargo",
+            "WATCHERS", "DETAILS", "cache-write", "ACTIVITY (2)", "cargo", "engine.rs",
         ] {
             assert!(s.contains(needle), "expected screen to contain {needle:?}\n{s}");
         }

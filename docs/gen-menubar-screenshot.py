@@ -123,7 +123,7 @@ subrows = [
     ("sep", ""),
     ("info", "running · opus-4-8 · cpu 34% · 420 MB"),
     ("info", "cwd ~/code/webapp"),
-    ("info", "procs 3 · cargo 87% · node 12% · zsh 0%"),
+    ("info", "now · Edit …src/engine.rs · cargo 87% · node 12%"),
     ("sep", ""),
     ("act", "Pause (SIGSTOP)"),
     ("act", "Resume (SIGCONT)"),

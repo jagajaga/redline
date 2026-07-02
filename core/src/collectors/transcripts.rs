@@ -50,6 +50,25 @@ pub enum TranscriptEvent {
     },
     /// An API 429 — a rate-limit hit, used to calibrate the plan-window budget.
     RateLimited { ts_ms: Option<i64> },
+    /// Any other tool call starting — in-flight until its tool_result arrives.
+    ToolStart {
+        id: String,
+        name: String,
+        detail: String,
+        ts_ms: Option<i64>,
+    },
+}
+
+/// The most interesting argument of a tool call, for display.
+fn tool_detail(input: Option<&Value>) -> String {
+    for key in [
+        "file_path", "command", "pattern", "query", "url", "description", "skill",
+    ] {
+        if let Some(v) = input.and_then(|i| i.get(key)).and_then(Value::as_str) {
+            return v.chars().take(100).collect();
+        }
+    }
+    String::new()
 }
 
 /// Parse one transcript line into zero or more events.
@@ -155,6 +174,17 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
                                     .and_then(|i| i.get("reason"))
                                     .and_then(Value::as_str)
                                     .map(str::to_string),
+                            });
+                        } else if !name.is_empty() {
+                            out.push(TranscriptEvent::ToolStart {
+                                id: block
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                name: name.to_string(),
+                                detail: tool_detail(block.get("input")),
+                                ts_ms,
                             });
                         }
                     }
@@ -300,6 +330,22 @@ mod tests {
     fn malformed_line_yields_nothing() {
         assert!(parse_line("{not json").is_empty());
         assert!(parse_line("").is_empty());
+    }
+
+    #[test]
+    fn tool_start_carries_detail() {
+        let line = r#"{"type":"assistant","timestamp":"2026-05-25T12:00:00.000Z","message":{"usage":{"input_tokens":1,"output_tokens":1},"content":[{"type":"tool_use","id":"toolu_e1","name":"Edit","input":{"file_path":"/x/engine.rs","old_string":"a"}},{"type":"tool_use","id":"toolu_b1","name":"Bash","input":{"command":"cargo build --release"}}]}}"#;
+        let evs = parse_line(line);
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            TranscriptEvent::ToolStart { id, name, detail, .. }
+                if id == "toolu_e1" && name == "Edit" && detail == "/x/engine.rs"
+        )));
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            TranscriptEvent::ToolStart { name, detail, .. }
+                if name == "Bash" && detail == "cargo build --release"
+        )));
     }
 
     #[test]

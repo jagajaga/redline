@@ -253,6 +253,19 @@ pub struct Alert {
     pub since_ms: i64,
 }
 
+/// An in-flight tool call — what the session is doing *right now* (editing a
+/// file, running a command, reading, searching). These are not OS processes:
+/// a `tool_use` whose `tool_result` hasn't arrived yet IS the live activity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Activity {
+    /// Tool name (Edit, Write, Read, Bash, Grep, …).
+    pub tool: String,
+    /// The interesting argument: file path, command, pattern, query.
+    pub detail: String,
+    /// Epoch ms the tool call started.
+    pub since_ms: i64,
+}
+
 /// A child process spawned by a session (build, dev server, test run, …),
 /// discovered by walking the OS process tree under the session's pid.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -288,6 +301,9 @@ pub struct Session {
     pub agents: Vec<Agent>,
     pub tasks: Vec<Task>,
     pub watchers: Vec<Watcher>,
+    /// In-flight tool calls: what the session is doing right now.
+    #[serde(default)]
+    pub activity: Vec<Activity>,
     /// Live child processes under this session's pid (workers, builds,
     /// dev servers) — monitored, sorted hottest-first.
     #[serde(default)]

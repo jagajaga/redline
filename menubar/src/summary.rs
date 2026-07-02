@@ -241,16 +241,29 @@ pub fn menu_model(s: &Snapshot) -> MenuModel {
                 tokens(t.cache_read),
                 t.messages
             );
-            let procs = if sess.processes.is_empty() {
-                "no child processes".to_string()
-            } else {
-                let top: Vec<String> = sess
-                    .processes
+            let mut work: Vec<String> = sess
+                .activity
+                .iter()
+                .take(2)
+                .map(|a| {
+                    let tail: String = if a.detail.chars().count() > 28 {
+                        format!("…{}", a.detail.chars().skip(a.detail.chars().count() - 27).collect::<String>())
+                    } else {
+                        a.detail.clone()
+                    };
+                    format!("{} {}", a.tool, tail)
+                })
+                .collect();
+            work.extend(
+                sess.processes
                     .iter()
-                    .take(3)
-                    .map(|p| format!("{} {:.0}%", p.name, p.cpu_pct))
-                    .collect();
-                format!("procs {} · {}", sess.processes.len(), top.join(" · "))
+                    .take(2)
+                    .map(|p| format!("{} {:.0}%", p.name, p.cpu_pct)),
+            );
+            let procs = if work.is_empty() {
+                "no live activity".to_string()
+            } else {
+                format!("now · {}", work.join(" · "))
             };
             let info = vec![
                 format!(
@@ -337,6 +350,7 @@ mod tests {
             agents: vec![],
             tasks: vec![],
             watchers: vec![],
+            activity: vec![],
             processes: vec![],
             host,
             remote_name: None,
@@ -376,7 +390,7 @@ mod tests {
         assert_eq!(e.tokens_per_min, 40_000.0);
         assert!(e.tokens_line.contains("in ") && e.tokens_line.contains("msgs"));
         assert_eq!(e.info.len(), 3);
-        assert!(e.info[2].contains("no child processes"));
+        assert!(e.info[2].contains("no live activity"));
         assert!(e.info[0].contains("running"));
         assert!(e.info[0].contains("opus-4-8"));
         assert!(e.info[1].contains("cwd /x"));

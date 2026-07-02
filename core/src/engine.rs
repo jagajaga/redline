@@ -64,6 +64,9 @@ impl AgentAccum {
 #[derive(Default)]
 struct SessionAccum {
     ledger: TokenLedger,
+    /// In-flight tool calls: id -> (tool, detail, started_ms). Removed when
+    /// the matching tool_result arrives.
+    pending_tools: HashMap<String, (String, String, i64)>,
     events: VecDeque<TokenEvent>,
     last_user_turn: Option<i64>,
     last_activity: Option<i64>,
@@ -301,6 +304,23 @@ impl Engine {
                 .and_then(|p| self.probe.stat(p))
                 .unwrap_or_default();
 
+            // In-flight activity: pending tools, oldest first. Entries whose
+            // results were lost (compaction, crashes) expire after 30 min.
+            accum
+                .pending_tools
+                .retain(|_, (_, _, ts)| now_ms - *ts < 30 * 60_000);
+            let mut activity: Vec<Activity> = accum
+                .pending_tools
+                .values()
+                .map(|(tool, detail, ts)| Activity {
+                    tool: tool.clone(),
+                    detail: detail.clone(),
+                    since_ms: *ts,
+                })
+                .collect();
+            activity.sort_by_key(|a| a.since_ms);
+            activity.truncate(6);
+
             // Agents (clone tree into model form).
             let agents: Vec<Agent> = accum.agents.iter().map(AgentAccum::to_model).collect();
             let agent_starts_in_window = count_recent_agent_starts(
@@ -377,6 +397,7 @@ impl Engine {
                 agents,
                 tasks: session_tasks,
                 watchers,
+                activity,
                 processes: meta
                     .pid
                     .map(|p| self.probe.children_of(p, 12))
@@ -570,6 +591,12 @@ impl Engine {
                         notification,
                     } => {
                         accum.finish_agent(&tool_use_id, notification);
+                        accum.pending_tools.remove(&tool_use_id);
+                    }
+                    TranscriptEvent::ToolStart { id, name, detail, ts_ms } => {
+                        if let Some(ts) = ts_ms {
+                            accum.pending_tools.insert(id, (name, detail, ts));
+                        }
                     }
                     TranscriptEvent::RateLimited { ts_ms } => {
                         if let Some(ts) = ts_ms {

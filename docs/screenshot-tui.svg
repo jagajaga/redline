@@ -64,15 +64,14 @@
 <text x="14.0" y="300.0" xml:space="preserve" fill="#cdd6f4">│                                                                                                                    │</text>
 <text x="14.0" y="318.0" xml:space="preserve" fill="#cdd6f4">│                                                                                                                    │</text>
 <text x="14.0" y="336.0" xml:space="preserve" fill="#cdd6f4">└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text>
-<text x="14.0" y="354.0" xml:space="preserve" fill="#cdd6f4">┌ TASKS (1/3) ─────────────────────────┐┌ PROCESSES (1) ──────────────────────┐┌ WATCHERS ───────────────────────────┐</text>
+<text x="14.0" y="354.0" xml:space="preserve" fill="#cdd6f4">┌ TASKS (1/3) ─────────────────────────┐┌ ACTIVITY (2) ───────────────────────┐┌ WATCHERS ───────────────────────────┐</text>
 <text x="14.0" y="372.0" xml:space="preserve" fill="#cdd6f4">│</text>
 <text x="22.4" y="372.0" xml:space="preserve" fill="#f9e2af">● </text>
 <text x="39.2" y="372.0" xml:space="preserve" fill="#cdd6f4">bump dependencies                   ││</text>
-<text x="358.4" y="372.0" xml:space="preserve" fill="#f38ba8">● </text>
-<text x="375.2" y="372.0" xml:space="preserve" fill="#cdd6f4">cargo         </text>
-<text x="492.8" y="372.0" xml:space="preserve" fill="#f38ba8">  87%   512M </text>
-<text x="602.0" y="372.0" xml:space="preserve" fill="#6c7086">3:12 </text>
-<text x="644.0" y="372.0" xml:space="preserve" fill="#cdd6f4">   ││</text>
+<text x="358.4" y="372.0" xml:space="preserve" fill="#f9e2af">✎ Edit  </text>
+<text x="425.6" y="372.0" xml:space="preserve" fill="#cdd6f4">core/src/engine.rs </text>
+<text x="585.2" y="372.0" xml:space="preserve" fill="#6c7086">5s</text>
+<text x="602.0" y="372.0" xml:space="preserve" fill="#cdd6f4">        ││</text>
 <text x="686.0" y="372.0" xml:space="preserve" fill="#f5c2e7">loop    </text>
 <text x="753.2" y="372.0" xml:space="preserve" fill="#cdd6f4">self-pacedbabysit</text>
 <text x="896.0" y="372.0" xml:space="preserve" fill="#6c7086">  next 10s</text>
@@ -81,7 +80,12 @@
 <text x="22.4" y="390.0" xml:space="preserve" fill="#bac2de">○ </text>
 <text x="39.2" y="390.0" xml:space="preserve" fill="#cdd6f4">audit deploy</text>
 <text x="140.0" y="390.0" xml:space="preserve" fill="#f38ba8"> ⛌blocked</text>
-<text x="215.6" y="390.0" xml:space="preserve" fill="#cdd6f4">               ││                                     ││                                     │</text>
+<text x="215.6" y="390.0" xml:space="preserve" fill="#cdd6f4">               ││</text>
+<text x="358.4" y="390.0" xml:space="preserve" fill="#f38ba8">● </text>
+<text x="375.2" y="390.0" xml:space="preserve" fill="#cdd6f4">cargo         </text>
+<text x="492.8" y="390.0" xml:space="preserve" fill="#f38ba8">  87%   512M </text>
+<text x="602.0" y="390.0" xml:space="preserve" fill="#6c7086">3:12 </text>
+<text x="644.0" y="390.0" xml:space="preserve" fill="#cdd6f4">   ││                                     │</text>
 <text x="14.0" y="408.0" xml:space="preserve" fill="#cdd6f4">│</text>
 <text x="22.4" y="408.0" xml:space="preserve" fill="#a6e3a1">✓ </text>
 <text x="39.2" y="408.0" xml:space="preserve" fill="#cdd6f4">update changelog                      ││                                     ││                                     │</text>

@@ -142,6 +142,7 @@ def scan_transcript(path):
     model = None
     agents = {}  # tool_use id -> agent dict, insertion-ordered
     bg_ids = set()  # background launches: plain tool_results don't finish them
+    pending = {}  # tool_use id -> (tool, detail, ts) awaiting a result
     try:
         size = os.path.getsize(path)
         fh = open(path, "rb")
@@ -179,12 +180,23 @@ def scan_transcript(path):
                             "tokens_per_min": 0.0,
                             "children": [],
                         }
+                    elif block.get("type") == "tool_use" and block.get("name") not in AGENT_TOOLS:
+                        inp = block.get("input") or {}
+                        detail = ""
+                        for key in ("file_path", "command", "pattern", "query", "url", "description"):
+                            if isinstance(inp.get(key), str):
+                                detail = inp[key][:100]
+                                break
+                        if ts:
+                            pending[block.get("id") or ""] = (block.get("name") or "", detail, ts)
                     elif block.get("type") == "tool_result":
                         tid = block.get("tool_use_id")
+                        pending.pop(tid, None)
                         # Background launches ack immediately; that's not done.
                         if tid in agents and tid not in bg_ids:
                             agents[tid]["state"] = "finished"
             tid = d.get("sourceToolUseID")
+            pending.pop(tid, None)
             if tid in agents and tid not in bg_ids:
                 agents[tid]["state"] = "finished"
             # Task-notifications are the authoritative background completion.
@@ -229,7 +241,12 @@ def scan_transcript(path):
         fh.close()
     except Exception:
         pass
-    return led, window_billable, last_act, model, list(agents.values())
+    activity = [
+        {"tool": t, "detail": det, "since_ms": ts}
+        for t, det, ts in sorted(pending.values(), key=lambda x: x[2])
+        if NOW_MS - ts < 30 * 60 * 1000
+    ][:6]
+    return led, window_billable, last_act, model, list(agents.values()), activity
 
 
 def read_tasks(sid):
@@ -267,10 +284,10 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
     if not sid or not pid or not alive(pid):
         continue
 
-    led, window_billable, last_act, model, agents = (
+    led, window_billable, last_act, model, agents, activity = (
         scan_transcript(transcripts[sid])
         if sid in transcripts
-        else (zero_ledger(), 0, None, None, [])
+        else (zero_ledger(), 0, None, None, [], [])
     )
     tpm = window_billable / (WINDOW_MS / 60000.0)
     last = last_act or meta.get("startedAt")
@@ -296,6 +313,7 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
         "agents": agents,
         "tasks": read_tasks(sid),
         "watchers": [],
+        "activity": activity,
         "processes": children_of(pid),
         "host": {"kind": "local"},
         "remote_name": None,
