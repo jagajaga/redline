@@ -28,6 +28,14 @@ HORIZON_MS = 6 * 3600 * 1000  # how far back buckets are reported
 
 # bucket_ts -> billable tokens, fed by every transcript scan
 USAGE_BUCKETS = {}
+# observed 429 timestamps (epoch ms) within the horizon
+RATE_LIMITS = []
+AGENT_TOOLS = ("Agent", "Task", "Workflow")
+
+
+def zero_ledger():
+    return dict(input=0, output=0, cache_write=0, cache_read=0,
+                web_search=0, web_fetch=0, messages=0)
 
 
 def alive(pid):
@@ -67,14 +75,13 @@ for p in glob.glob(os.path.join(ROOT, "projects", "*", "*.jsonl")):
 
 
 def scan_transcript(path):
-    """Fold assistant usage: (ledger, window_billable, last_activity, model)."""
-    led = dict(
-        input=0, output=0, cache_write=0, cache_read=0,
-        web_search=0, web_fetch=0, messages=0,
-    )
+    """Fold assistant usage; returns
+    (ledger, window_billable, last_activity, model, agents)."""
+    led = zero_ledger()
     window_billable = 0
     last_act = None
     model = None
+    agents = {}  # tool_use id -> agent dict, insertion-ordered
     try:
         size = os.path.getsize(path)
         fh = open(path, "rb")
@@ -86,9 +93,40 @@ def scan_transcript(path):
                 d = json.loads(raw)
             except Exception:
                 continue
+            ts = parse_ts(d.get("timestamp") or "")
+            if d.get("apiErrorStatus") == 429 and ts and ts >= NOW_MS - HORIZON_MS:
+                RATE_LIMITS.append(ts)
+            m = d.get("message") or {}
+            content = m.get("content")
+            # Agent lifecycle: launches in assistant turns, completions via
+            # tool_result carriers.
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_use" and block.get("name") in AGENT_TOOLS:
+                        inp = block.get("input") or {}
+                        agents[block.get("id") or ""] = {
+                            "id": block.get("id") or "",
+                            "subagent_type": inp.get("subagent_type") or block.get("name"),
+                            "description": inp.get("description") or "",
+                            "model": inp.get("model"),
+                            "state": "running",
+                            "started_at": ts,
+                            "tokens": zero_ledger(),
+                            "tokens_per_min": 0.0,
+                            "children": [],
+                        }
+                    elif block.get("type") == "tool_result":
+                        tid = block.get("tool_use_id")
+                        if tid in agents:
+                            agents[tid]["state"] = "finished"
+            tid = d.get("sourceToolUseID")
+            if tid in agents:
+                agents[tid]["state"] = "finished"
+
             if d.get("type") != "assistant":
                 continue
-            m = d.get("message") or {}
             u = m.get("usage") or {}
             if not u:
                 continue
@@ -104,7 +142,6 @@ def scan_transcript(path):
             # Skip internal markers like "<synthetic>".
             if m.get("model") and not m["model"].startswith("<"):
                 model = m["model"]
-            ts = parse_ts(d.get("timestamp") or "")
             if ts:
                 last_act = max(last_act or 0, ts)
                 billable = (
@@ -120,7 +157,7 @@ def scan_transcript(path):
         fh.close()
     except Exception:
         pass
-    return led, window_billable, last_act, model
+    return led, window_billable, last_act, model, list(agents.values())
 
 
 def read_tasks(sid):
@@ -158,11 +195,10 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
     if not sid or not pid or not alive(pid):
         continue
 
-    led, window_billable, last_act, model = (
+    led, window_billable, last_act, model, agents = (
         scan_transcript(transcripts[sid])
         if sid in transcripts
-        else (dict(input=0, output=0, cache_write=0, cache_read=0,
-                   web_search=0, web_fetch=0, messages=0), 0, None, None)
+        else (zero_ledger(), 0, None, None, [])
     )
     tpm = window_billable / (WINDOW_MS / 60000.0)
     last = last_act or meta.get("startedAt")
@@ -185,7 +221,7 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
         "tokens_per_min": tpm,
         "cpu_pct": cpu,
         "rss_mb": rss,
-        "agents": [],
+        "agents": agents,
         "tasks": read_tasks(sid),
         "watchers": [],
         "host": {"kind": "local"},
@@ -205,6 +241,7 @@ print(json.dumps({
     "sessions": sessions,
     "alerts": [],
     "usage_buckets": sorted(USAGE_BUCKETS.items()),
+    "rate_limits": sorted(set(RATE_LIMITS)),
     "totals": {
         "active_sessions": len(sessions),
         "tokens_per_min": sum(s["tokens_per_min"] for s in sessions),

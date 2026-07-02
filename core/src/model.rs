@@ -304,6 +304,10 @@ pub struct Snapshot {
     /// usage can be integrated with a proper window anchor.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub usage_buckets: Vec<(i64, u64)>,
+    /// Observed 429 rate-limit timestamps (epoch ms) within the horizon —
+    /// they hard-anchor window boundaries and calibrate the budget.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rate_limits: Vec<i64>,
     /// Fuel-gauge readouts; computed by the daemon after merging all hosts.
     #[serde(default)]
     pub governor: Option<GovernorStatus>,
@@ -317,6 +321,7 @@ impl Snapshot {
             alerts: Vec::new(),
             totals: Totals::default(),
             usage_buckets: Vec::new(),
+            rate_limits: Vec::new(),
             governor: None,
         }
     }

@@ -137,6 +137,8 @@ pub struct Engine {
     accums: HashMap<String, SessionAccum>,
     /// Timestamps of observed 429 rate-limit events (pruned to retention).
     rate_limits: VecDeque<i64>,
+    /// Last time ended-session transcripts were rescanned (epoch ms).
+    last_ended_scan: i64,
 }
 
 impl Engine {
@@ -148,6 +150,8 @@ impl Engine {
             watermarks: HashMap::new(),
             accums: HashMap::new(),
             rate_limits: VecDeque::new(),
+            // i64::MIN would overflow the subtraction; "long ago" is enough.
+            last_ended_scan: -1,
         }
     }
 
@@ -174,13 +178,14 @@ impl Engine {
 
     /// Rebuild the snapshot as of `now_ms`.
     pub fn refresh(&mut self, now_ms: i64) -> Snapshot {
-        self.probe.refresh();
-
         // Index transcripts by session id (filename stem).
         let transcript_index = self.index_transcripts();
 
-        // Which sessions exist right now.
+        // Which sessions exist right now. Only their pids are probed —
+        // a full process-table scan every tick is wasted CPU.
         let metas = sessions::read_sessions(&self.paths.sessions());
+        let pids: Vec<i32> = metas.iter().filter_map(|m| m.pid).collect();
+        self.probe.refresh_pids(&pids);
 
         // Fold any new transcript bytes for each known session.
         for meta in &metas {
@@ -191,24 +196,29 @@ impl Engine {
 
         // Also ingest recently-modified transcripts of sessions that no longer
         // exist — their burn still counts against the account's plan window.
-        let known: std::collections::HashSet<&str> =
-            metas.iter().map(|m| m.session_id.as_str()).collect();
+        // Their files don't change often, so stat-ing hundreds of transcripts
+        // is throttled to every 30 s rather than every tick.
         let retention_ms = self.config.retention_secs() * 1000;
-        let recent: Vec<(String, PathBuf)> = transcript_index
-            .iter()
-            .filter(|(sid, path)| {
-                !known.contains(sid.as_str())
-                    && std::fs::metadata(path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .map(|age| (age.as_millis() as i64) < retention_ms)
-                        .unwrap_or(false)
-            })
-            .map(|(sid, path)| (sid.clone(), path.clone()))
-            .collect();
-        for (sid, path) in recent {
-            self.ingest_transcript(&sid, path);
+        if now_ms - self.last_ended_scan >= 30_000 {
+            self.last_ended_scan = now_ms;
+            let known: std::collections::HashSet<&str> =
+                metas.iter().map(|m| m.session_id.as_str()).collect();
+            let recent: Vec<(String, PathBuf)> = transcript_index
+                .iter()
+                .filter(|(sid, path)| {
+                    !known.contains(sid.as_str())
+                        && std::fs::metadata(path)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.elapsed().ok())
+                            .map(|age| (age.as_millis() as i64) < retention_ms)
+                            .unwrap_or(false)
+                })
+                .map(|(sid, path)| (sid.clone(), path.clone()))
+                .collect();
+            for (sid, path) in recent {
+                self.ingest_transcript(&sid, path);
+            }
         }
 
         // Prune stale rate-limit events.
@@ -388,6 +398,7 @@ impl Engine {
             alerts,
             totals,
             usage_buckets: bucket_map.into_iter().collect(),
+            rate_limits: self.rate_limit_ts(),
             governor: None,
         }
     }

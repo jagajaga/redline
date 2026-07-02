@@ -37,6 +37,10 @@ fn run(
     mut rx: Option<Receiver<FromDaemon>>,
 ) -> anyhow::Result<()> {
     let mut last_reconnect = Instant::now();
+    // Draw only when something changed (snapshot, keypress, connection) or on
+    // a 1 s heartbeat for the relative-time labels — an idle TUI costs ~0 CPU.
+    let mut dirty = true;
+    let mut last_periodic = Instant::now();
     loop {
         // Drain any pending daemon messages.
         if let Some(r) = &rx {
@@ -45,17 +49,20 @@ fn run(
                     Ok(FromDaemon::Snapshot(s)) => {
                         app.connected = true;
                         app.set_snapshot(*s);
+                        dirty = true;
                     }
                     Ok(FromDaemon::Heartbeat) => app.connected = true,
                     Ok(FromDaemon::Disconnected) => {
                         app.connected = false;
                         rx = None;
+                        dirty = true;
                         break;
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         app.connected = false;
                         rx = None;
+                        dirty = true;
                         break;
                     }
                 }
@@ -69,16 +76,28 @@ fn run(
             if let Ok(new_rx) = client::subscribe(paths) {
                 rx = Some(new_rx);
                 app.connected = true;
+                dirty = true;
             }
         }
 
-        terminal.draw(|f| ui::draw(f, app))?;
+        if last_periodic.elapsed() >= Duration::from_secs(1) {
+            last_periodic = Instant::now();
+            dirty = true; // "Ns ago" labels tick forward
+        }
 
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+        if dirty {
+            terminal.draw(|f| ui::draw(f, app))?;
+            dirty = false;
+        }
+
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(app, paths, key.code);
+                    dirty = true;
                 }
+                Event::Resize(_, _) => dirty = true,
+                _ => {}
             }
         }
         if app.should_quit {

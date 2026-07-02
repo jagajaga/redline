@@ -61,13 +61,14 @@ pub fn tray_title(s: &Snapshot, connected: bool) -> String {
     if !connected {
         return "⏻".to_string();
     }
-    if !s.alerts.is_empty() {
-        return format!("⚠{}", s.alerts.len());
+    let delta = s.governor.as_ref().and_then(|g| g.primary_delta());
+    match (delta, s.alerts.len()) {
+        // The throttle stays visible even when alerts fire.
+        (Some(d), n) if n > 0 => format!("{} ⚠{n}", delta_str(d)),
+        (Some(d), _) => delta_str(d),
+        (None, n) if n > 0 => format!("⚠{n}"),
+        (None, _) => rate(s.totals.tokens_per_min),
     }
-    if let Some(delta) = s.governor.as_ref().and_then(|g| g.primary_delta()) {
-        return delta_str(delta);
-    }
-    rate(s.totals.tokens_per_min)
 }
 
 /// The governor line for the dropdown: throttle, range, tank, reset.
@@ -317,6 +318,7 @@ mod tests {
             message: "burning".into(),
             since_ms: 0,
         });
+        // No governor data → alert count alone.
         assert_eq!(tray_title(&s, true), "⚠1");
     }
 
@@ -435,7 +437,7 @@ mod tests {
             message: "wall".into(),
             since_ms: 0,
         });
-        assert_eq!(tray_title(&s, true), "⚠1");
+        assert_eq!(tray_title(&s, true), "▲3.6× ⚠1", "delta must stay visible with alerts");
     }
 
     #[test]

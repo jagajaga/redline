@@ -37,6 +37,18 @@ impl ProcessProbe {
             .refresh_processes(ProcessesToUpdate::All, true);
     }
 
+    /// Refresh only the given pids — far cheaper than a full process-table
+    /// scan when we already know which sessions we care about.
+    pub fn refresh_pids(&mut self, pids: &[i32]) {
+        let pids: Vec<Pid> = pids
+            .iter()
+            .filter(|p| **p > 0)
+            .map(|p| Pid::from_u32(*p as u32))
+            .collect();
+        self.sys
+            .refresh_processes(ProcessesToUpdate::Some(&pids), true);
+    }
+
     /// Is this pid currently a live process?
     pub fn is_alive(&self, pid: i32) -> bool {
         pid > 0 && self.sys.process(Pid::from_u32(pid as u32)).is_some()

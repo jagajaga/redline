@@ -54,6 +54,25 @@ fn probe_emits_valid_snapshot() {
         });
         lines.push_str(&format!("{v}\n"));
     }
+    // An agent launch (running: no tool_result follows) and a 429 event.
+    let agent_line = serde_json::json!({
+        "type": "assistant",
+        "timestamp": rfc3339(now_ms - 20_000),
+        "message": {
+            "model": "claude-opus-4-8",
+            "content": [{"type": "tool_use", "id": "toolu_r1", "name": "Agent",
+                         "input": {"description": "remote scan", "subagent_type": "Explore"}}]
+        }
+    });
+    lines.push_str(&format!("{agent_line}\n"));
+    let rl_line = serde_json::json!({
+        "type": "assistant",
+        "timestamp": rfc3339(now_ms - 10_000),
+        "apiErrorStatus": 429,
+        "isApiErrorMessage": true,
+        "message": {"content": "rate limited"}
+    });
+    lines.push_str(&format!("{rl_line}\n"));
     std::fs::write(proj.join(format!("{sid}.jsonl")), lines).unwrap();
 
     let tasks = root.join("tasks").join(sid);
@@ -100,6 +119,15 @@ fn probe_emits_valid_snapshot() {
         "expected ~660 tok/min, got {}",
         s.tokens_per_min
     );
+
+    // The agent came through, running.
+    assert_eq!(s.agents.len(), 1);
+    assert_eq!(s.agents[0].description, "remote scan");
+    assert_eq!(s.agents[0].subagent_type, "Explore");
+    assert!(matches!(s.agents[0].state, ccwatch_core::model::AgentState::Running));
+
+    // The 429 came through.
+    assert_eq!(snap.rate_limits.len(), 1);
 
     // Tasks came through.
     assert_eq!(s.tasks.len(), 1);

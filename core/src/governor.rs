@@ -36,15 +36,56 @@ pub fn merge_buckets(lists: &[&[(i64, u64)]]) -> Vec<(i64, u64)> {
     map.into_iter().collect()
 }
 
-/// Find the current plan-window start: windows are `window_ms` long, the first
-/// one starts at the first activity, and after a window expires the next one
-/// starts at the first activity that follows. Returns `None` when there is no
-/// activity in the current window (tank idle/full).
-pub fn window_start(buckets: &[(i64, u64)], now_ms: i64, window_ms: i64) -> Option<i64> {
-    let mut start: Option<i64> = None;
+/// A 429 followed by at least this much usage silence is read as "we were
+/// limited until the window reset" — the next activity anchors a NEW window.
+const LIMIT_BLACKOUT_MS: i64 = 30 * 60 * 1000;
+
+/// Find the current plan-window start.
+///
+/// Two signals, strongest first:
+///
+/// 1. **Rate-limit blackouts** (ground truth): a 429 followed by ≥30 min of
+///    zero usage means the account was limited until Anthropic's window reset;
+///    the first activity after the blackout anchors a fresh window. This
+///    hard-corrects any drift from the replay below.
+/// 2. **Chain replay**: windows are `window_ms` long, the first message starts
+///    one, and after it expires the next message starts the next.
+///
+/// Returns `None` when there is no activity in the current window.
+pub fn window_start(
+    buckets: &[(i64, u64)],
+    rate_limits: &[i64],
+    now_ms: i64,
+    window_ms: i64,
+) -> Option<i64> {
+    // Signal 1: the latest 429-blackout boundary.
+    let mut hard_anchor: Option<i64> = None;
+    for &rl in rate_limits {
+        if rl > now_ms {
+            continue;
+        }
+        // First activity strictly after the 429.
+        let resume = buckets
+            .iter()
+            .find(|(ts, v)| *v > 0 && *ts > bucket_of(rl))
+            .map(|(ts, _)| *ts);
+        if let Some(r) = resume {
+            if r - rl >= LIMIT_BLACKOUT_MS && hard_anchor.map(|h| r > h).unwrap_or(true) {
+                hard_anchor = Some(r);
+            }
+        }
+    }
+
+    // Signal 2: chain replay, starting from the hard anchor when we have one.
+    let mut start: Option<i64> = hard_anchor;
     for &(ts, v) in buckets {
         if v == 0 || ts > now_ms {
             continue;
+        }
+        if let Some(h) = hard_anchor {
+            if ts < h {
+                continue; // pre-boundary history is a previous window
+            }
         }
         match start {
             None => start = Some(ts),
@@ -120,10 +161,12 @@ fn make_tank(
     }
 }
 
-/// Compute the full governor status. `learned_window_budget` comes from
-/// observed 429s and is used when no config budget is set.
+/// Compute the full governor status. `rate_limits` are observed 429 timestamps
+/// (they hard-anchor window boundaries); `learned_window_budget` comes from
+/// them too and is used when no config budget is set.
 pub fn compute(
     buckets: &[(i64, u64)],
+    rate_limits: &[i64],
     now_ms: i64,
     cfg: &Config,
     learned_window_budget: Option<u64>,
@@ -138,7 +181,7 @@ pub fn compute(
         (None, Some(b)) => (Some(b), BudgetSource::Learned),
         _ => (None, BudgetSource::Unknown),
     };
-    let window = match window_start(buckets, now_ms, window_ms) {
+    let window = match window_start(buckets, rate_limits, now_ms, window_ms) {
         Some(start) => make_tank(
             sum_range(buckets, start, now_ms),
             w_budget,
@@ -223,7 +266,7 @@ pub fn wall_alert(g: &GovernorStatus, now_ms: i64) -> Option<Alert> {
 pub fn learn_budget(buckets: &[(i64, u64)], rate_limit_ts: &[i64], window_ms: i64) -> Option<u64> {
     let mut best = None;
     for &ts in rate_limit_ts {
-        if let Some(start) = window_start(buckets, ts, window_ms) {
+        if let Some(start) = window_start(buckets, rate_limit_ts, ts, window_ms) {
             let used = sum_range(buckets, start, ts);
             if used > 0 && best.map(|b| used > b).unwrap_or(true) {
                 best = Some(used);
@@ -262,12 +305,51 @@ mod tests {
         // 2h ago falls INSIDE it; activity 30m ago (after that window expired)
         // anchors the current window.
         let b = buckets(&[(360, 100), (120, 200), (30, 300)]);
-        let start = window_start(&b, NOW, 5 * H).unwrap();
+        let start = window_start(&b, &[], NOW, 5 * H).unwrap();
         assert_eq!(start, bucket_of(NOW - 30 * 60_000));
 
         // No activity in the current window → None.
         let b = buckets(&[(360, 100)]);
-        assert!(window_start(&b, NOW, 5 * H).is_none());
+        assert!(window_start(&b, &[], NOW, 5 * H).is_none());
+    }
+
+    #[test]
+    fn rate_limit_blackout_hard_anchors_the_window() {
+        // The user's real scenario: burning 20:00→22:25, hit the limit
+        // (429s) at 22:25, blacked out until 01:05, resumed, now it's 02:30.
+        // Naive chain replay from truncated history would anchor wrong; the
+        // 429+blackout must anchor the window at the 01:05 resume.
+        //
+        // Offsets from NOW (=02:30): 20:00=390m, 22:25=245m, 01:05=85m.
+        let b = buckets(&[
+            (390, 500_000), // evening burn
+            (300, 800_000),
+            (250, 900_000), // approaching the wall
+            (85, 50_000),   // resumed after unblock
+            (30, 80_000),
+            (2, 40_000),
+        ]);
+        let rl = vec![NOW - 245 * 60_000]; // 429 at 22:25
+        let start = window_start(&b, &rl, NOW, 5 * H).unwrap();
+        assert_eq!(
+            start,
+            bucket_of(NOW - 85 * 60_000),
+            "window must anchor at the post-blackout resume"
+        );
+
+        // Used counts only post-resume burn.
+        let mut c = cfg();
+        c.governor_window_budget = None;
+        let g = compute(&b, &rl, NOW, &c, None);
+        assert_eq!(g.window.used, 170_000);
+        // Reset = resume + 5h.
+        assert_eq!(g.window.resets_at, Some(bucket_of(NOW - 85 * 60_000) + 5 * H));
+
+        // A transient 429 with immediate continuation must NOT re-anchor.
+        let b2 = buckets(&[(120, 100_000), (110, 100_000), (2, 50_000)]);
+        let rl2 = vec![NOW - 115 * 60_000]; // 429 mid-burn, work continued
+        let start2 = window_start(&b2, &rl2, NOW, 5 * H).unwrap();
+        assert_eq!(start2, bucket_of(NOW - 120 * 60_000), "no blackout → no re-anchor");
     }
 
     #[test]
@@ -275,7 +357,7 @@ mod tests {
         // Old window: activity 7h ago (window expired 2h ago). Current window
         // anchors at 80m ago; the 30m-ago burn is inside it too.
         let b = buckets(&[(420, 100_000), (80, 200_000), (30, 300_000)]);
-        let g = compute(&b, NOW, &cfg(), None);
+        let g = compute(&b, &[], NOW, &cfg(), None);
         assert_eq!(g.window.used, 500_000, "old-window usage must not count");
         assert_eq!(g.window.budget, Some(1_000_000));
         assert_eq!(
@@ -290,7 +372,7 @@ mod tests {
         // Window anchored 2h ago → resets 3h from now. Used 500k of 1M.
         // Recent burn: 50k in the last 5 min → 10k/min.
         let b = buckets(&[(120, 450_000), (2, 50_000)]);
-        let g = compute(&b, NOW, &cfg(), None);
+        let g = compute(&b, &[], NOW, &cfg(), None);
         let w = &g.window;
         assert_eq!(w.used, 500_000);
         assert!((w.rate_per_min - 10_000.0).abs() < 1.0);
@@ -309,7 +391,7 @@ mod tests {
     fn no_wall_when_coasting() {
         // Burning slower than cruise → no wall, delta < 1.
         let b = buckets(&[(120, 100_000), (2, 5_000)]);
-        let g = compute(&b, NOW, &cfg(), None);
+        let g = compute(&b, &[], NOW, &cfg(), None);
         assert!(g.window.delta.unwrap() < 1.0);
         assert!(g.window.wall_at.is_none());
         assert!(wall_alert(&g, NOW).is_none());
@@ -318,7 +400,7 @@ mod tests {
     #[test]
     fn cruise_tank_rolls_hourly() {
         let b = buckets(&[(90, 500_000), (30, 100_000), (2, 50_000)]);
-        let g = compute(&b, NOW, &cfg(), None);
+        let g = compute(&b, &[], NOW, &cfg(), None);
         assert_eq!(g.cruise.used, 150_000, "only last-hour usage");
         assert_eq!(g.cruise.budget, Some(300_000));
         assert!(g.cruise.delta.unwrap() > 1.0, "10k/min vs 2.5k/min cruise");
@@ -335,7 +417,7 @@ mod tests {
         // Learned feeds the tank when config has no budget.
         let mut c = cfg();
         c.governor_window_budget = None;
-        let g = compute(&b, NOW, &c, Some(450_000));
+        let g = compute(&b, &rl, NOW, &c, Some(450_000));
         assert_eq!(g.window.budget, Some(450_000));
         assert_eq!(g.window.budget_source, BudgetSource::Learned);
     }
@@ -345,7 +427,7 @@ mod tests {
         let mut c = cfg();
         c.governor_window_budget = Some(100); // tiny budget, long overshot
         let b = buckets(&[(60, 500_000), (2, 50_000)]);
-        let g = compute(&b, NOW, &c, None);
+        let g = compute(&b, &[], NOW, &c, None);
         assert!(g.window.delta.unwrap() >= DELTA_EMPTY);
         assert_eq!(g.window.range_min, Some(0.0));
     }

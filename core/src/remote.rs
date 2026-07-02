@@ -235,6 +235,12 @@ pub fn merge(local: Snapshot, remotes: &[Snapshot]) -> Snapshot {
         .chain(remotes.iter().map(|r| &r.usage_buckets[..]))
         .collect();
     let usage_buckets = crate::governor::merge_buckets(&bucket_lists);
+    let mut rate_limits: Vec<i64> = local.rate_limits.clone();
+    for r in remotes {
+        rate_limits.extend(&r.rate_limits);
+    }
+    rate_limits.sort_unstable();
+    rate_limits.dedup();
 
     Snapshot {
         generated_at: local.generated_at,
@@ -242,6 +248,7 @@ pub fn merge(local: Snapshot, remotes: &[Snapshot]) -> Snapshot {
         alerts,
         totals,
         usage_buckets,
+        rate_limits,
         governor: None,
     }
 }

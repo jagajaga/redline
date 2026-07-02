@@ -512,6 +512,7 @@ pub(crate) mod test_support {
                 cache_hit_pct: 92.0,
             },
             usage_buckets: Vec::new(),
+            rate_limits: Vec::new(),
             governor: None,
         }
     }

@@ -108,7 +108,7 @@ fn main() -> anyhow::Result<()> {
             let window_ms = config.governor_window_hours * 3_600_000;
             if let Some(est) = ccwatch_core::governor::learn_budget(
                 &snap.usage_buckets,
-                &engine.rate_limit_ts(),
+                &snap.rate_limits,
                 window_ms,
             ) {
                 if learned.map(|l| est > l).unwrap_or(true) {
@@ -121,6 +121,7 @@ fn main() -> anyhow::Result<()> {
             }
             let g = ccwatch_core::governor::compute(
                 &snap.usage_buckets,
+                &snap.rate_limits,
                 snap.generated_at,
                 &config,
                 learned,
@@ -136,8 +137,13 @@ fn main() -> anyhow::Result<()> {
             let mut engine = Engine::new(paths2, engine_config);
             // Prime immediately so early subscribers get real data.
             *shared.write().unwrap() = Arc::new(build(&mut engine));
-            for _ in tick_rx {
+            while tick_rx.recv().is_ok() {
+                // Debounce: a burst of file events collapses into one refresh,
+                // and refreshes are spaced at least 500 ms apart.
+                std::thread::sleep(Duration::from_millis(150));
+                while tick_rx.try_recv().is_ok() {}
                 *shared.write().unwrap() = Arc::new(build(&mut engine));
+                std::thread::sleep(Duration::from_millis(350));
             }
         });
     }
