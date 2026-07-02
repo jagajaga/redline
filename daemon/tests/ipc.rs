@@ -223,6 +223,60 @@ fn daemon_merges_remote_and_cancels() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn daemon_exits_after_last_client_leaves() {
+    let root = std::env::temp_dir().join(format!("ccw-idle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let paths = Paths::new(&root);
+    std::fs::create_dir_all(paths.ccwatch_dir()).unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ccwatchd"))
+        .env("CLAUDE_CONFIG_DIR", &root)
+        .env("CCWATCH_IDLE_EXIT_SECS", "2")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn ccwatchd");
+
+    // Two subscribers.
+    let sub = |paths: &Paths| -> UnixStream {
+        let s = connect(paths);
+        let mut w = s.try_clone().unwrap();
+        w.write_all((serde_json::to_string(&ClientMsg::Subscribe).unwrap() + "
+").as_bytes())
+            .unwrap();
+        w.flush().unwrap();
+        s
+    };
+    let s1 = sub(&paths);
+    let s2 = sub(&paths);
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // Drop ONE client: the other keeps the daemon alive well past the grace.
+    drop(s1);
+    std::thread::sleep(Duration::from_millis(3500));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "daemon must stay alive while a client remains"
+    );
+
+    // Drop the LAST client: the daemon exits within the grace window and
+    // cleans up its socket and pidfile.
+    drop(s2);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "daemon should have exited");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(!paths.socket().exists(), "socket should be removed");
+    assert!(!paths.pidfile().exists(), "pidfile should be removed");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn send_action(paths: &Paths, req: ActionRequest) -> (bool, String) {
     let mut stream = UnixStream::connect(paths.socket()).unwrap();
     stream

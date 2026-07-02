@@ -17,11 +17,15 @@ use ccwatch_core::{Config, Engine, Paths};
 use remotes::RemoteManager;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
+/// Exit this long after the last subscriber disconnects (override with
+/// `CCWATCH_IDLE_EXIT_SECS`; `--persist` disables).
+const IDLE_EXIT: Duration = Duration::from_secs(15);
 const PUSH_INTERVAL: Duration = Duration::from_millis(500);
 const KILL_GRACE: Duration = Duration::from_secs(2);
 /// How often to re-fetch remote hosts (override with `CCWATCH_REMOTE_SECS`).
@@ -55,6 +59,35 @@ fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)?;
     eprintln!("ccwatchd listening at {}", sock.display());
+
+    // The daemon exists to serve clients: count subscribers and exit once the
+    // last one has been gone for a grace period. A surviving client (TUI or
+    // menu bar) keeps it alive; `--persist` opts out entirely.
+    let subscribers = Arc::new(AtomicUsize::new(0));
+    if !std::env::args().any(|a| a == "--persist") {
+        let grace = std::env::var("CCWATCH_IDLE_EXIT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(IDLE_EXIT);
+        let subs = subscribers.clone();
+        let sock = sock.clone();
+        let pidfile = paths.pidfile();
+        std::thread::spawn(move || {
+            let mut last_active = Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_millis(1000));
+                if subs.load(Ordering::Relaxed) > 0 {
+                    last_active = Instant::now();
+                } else if last_active.elapsed() > grace {
+                    eprintln!("no clients for {grace:?}; exiting");
+                    let _ = std::fs::remove_file(&sock);
+                    let _ = std::fs::remove_file(&pidfile);
+                    std::process::exit(0);
+                }
+            }
+        });
+    }
 
     // Shared latest snapshot, updated by the refresher thread.
     let shared: SharedSnapshot = Arc::new(RwLock::new(Arc::new(Snapshot::empty(0))));
@@ -156,8 +189,11 @@ fn main() -> anyhow::Result<()> {
                 let paths = paths.clone();
                 let tick_tx = tick_tx.clone();
                 let remote_defs = remote_defs.clone();
+                let subscribers = subscribers.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, shared, paths, tick_tx, remote_defs) {
+                    if let Err(e) =
+                        handle_client(stream, shared, paths, tick_tx, remote_defs, subscribers)
+                    {
                         eprintln!("client error: {e}");
                     }
                 });
@@ -199,6 +235,7 @@ fn handle_client(
     paths: Paths,
     tick_tx: Sender<()>,
     remote_defs: Arc<Vec<RemoteDef>>,
+    subscribers: Arc<AtomicUsize>,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
@@ -219,7 +256,12 @@ fn handle_client(
     };
 
     match msg {
-        ClientMsg::Subscribe => push_loop(&mut writer, &shared)?,
+        ClientMsg::Subscribe => {
+            subscribers.fetch_add(1, Ordering::Relaxed);
+            let result = push_loop(&mut writer, &shared);
+            subscribers.fetch_sub(1, Ordering::Relaxed);
+            result?
+        }
         ClientMsg::Action(req) => {
             let snapshot = shared.read().unwrap().clone();
             let outcome = execute_action(&req, &paths, &remote_defs, &snapshot);

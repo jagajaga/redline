@@ -39,7 +39,9 @@ Then:
 ./target/release/ccwatch-menubar   # menu-bar app
 ```
 
-Both start the background daemon automatically.
+Both start the background daemon automatically, and it exits on its own
+~15 s after the last client closes (so quitting the TUI/menu bar leaves
+nothing behind; `ccwatchd --persist` keeps it resident).
 
 ## Terminal UI
 
