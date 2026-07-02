@@ -408,7 +408,7 @@ mod macos {
         let mut history = graph::History::new(graph::SLOTS);
         // Per-session sparkline histories, keyed by session id.
         let mut session_hist: HashMap<String, graph::History> = HashMap::new();
-        let initial = graph::render_tray(&[], burn);
+        let initial = graph::render_tray(&[], burn, None);
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu.menu.clone()))
             .with_icon(tray_icon::Icon::from_rgba(
@@ -479,7 +479,10 @@ mod macos {
                 if last_sample.elapsed() >= SAMPLE_EVERY {
                     last_sample = Instant::now();
                     history.push(snap.totals.tokens_per_min);
-                    let rgba = graph::render_tray(&history.values(), burn);
+                    // Color the bars by the same metric the Settings view shows
+                    // (throttle by default); None = per-bar load for the Rate view.
+                    let heat = summary::tray_heat(&snap, prefs.title_mode);
+                    let rgba = graph::render_tray(&history.values(), burn, heat);
                     if let Ok(icon) = tray_icon::Icon::from_rgba(
                         rgba,
                         graph::ICON_W as u32,

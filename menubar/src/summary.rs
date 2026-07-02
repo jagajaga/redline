@@ -105,6 +105,41 @@ pub fn tray_title(s: &Snapshot, connected: bool, mode: crate::prefs::TitleMode) 
     }
 }
 
+/// Tray-icon color heat in `0.0..=1.0` (teal → amber → red) for the selected
+/// view, so the bars mean the same thing as the text beside them. `None` →
+/// per-bar absolute load (the Rate view, and the fallback when the governor
+/// can't answer, e.g. no learned budget yet).
+pub fn tray_heat(s: &Snapshot, mode: crate::prefs::TitleMode) -> Option<f64> {
+    use crate::prefs::TitleMode as M;
+    let g = s.governor.as_ref();
+    // Fullness of a tank as used/budget, clamped — 0 empty-drained ... 1 full.
+    let used_frac = |t: &ccwatch_core::model::Tank| {
+        t.budget
+            .map(|b| (t.used as f64 / b as f64).clamp(0.0, 1.0))
+    };
+    match mode {
+        // Load view (and the no-data fallback) keeps the per-bar burn coloring.
+        M::Rate => None,
+        // Throttle / Range / Nothing all track window-wall proximity: how fast
+        // you're draining vs the pace that lands exactly at the reset.
+        M::Throttle | M::Range | M::Nothing => g.and_then(|g| g.window.delta).map(throttle_heat),
+        // Tank / Week: how full the real cap is.
+        M::Tank => g.and_then(|g| used_frac(&g.window)),
+        M::Week => g.and_then(|g| g.week.as_ref()).and_then(used_frac),
+    }
+}
+
+/// Map the throttle delta to color heat: calm (teal) while comfortably under
+/// the land-at-reset pace, ramping to red as it reaches 1× (you'll hit the
+/// wall before the window resets). `⛔` (empty, still burning) pins to red.
+fn throttle_heat(delta: f64) -> f64 {
+    if delta.is_infinite() || delta >= ccwatch_core::governor::DELTA_EMPTY {
+        return 1.0;
+    }
+    // 0.6× and below → teal; 1.0× → red. So ▼0.4× reads calm.
+    ((delta - 0.6) / 0.4).clamp(0.0, 1.0)
+}
+
 /// The governor line for the dropdown: throttle, range, tank, reset.
 pub fn governor_line(s: &Snapshot) -> String {
     let Some(g) = &s.governor else {
@@ -573,6 +608,44 @@ mod tests {
         assert!(line.contains("range 1h38m"), "{line}");
         assert!(line.contains("tank ~38%"), "learned budgets marked ~: {line}");
         assert!(!line.contains("hour"), "no self-set hourly cruise anymore: {line}");
+    }
+
+    #[test]
+    fn tray_heat_tracks_selected_view() {
+        use crate::prefs::TitleMode as M;
+        let mut s = base();
+        // No governor yet → fall back to per-bar load (None) in every mode.
+        assert_eq!(tray_heat(&s, M::Throttle), None);
+
+        let window = Tank {
+            used: 200_000,
+            budget: Some(1_000_000), // 20% used → 80% left
+            budget_source: BudgetSource::Learned,
+            window_start: 0,
+            resets_at: Some(1_000_000_000),
+            rate_per_min: 4_000.0,
+            cruise_per_min: Some(10_000.0),
+            delta: Some(0.4), // ▼0.4× — calm
+            range_min: Some(200.0),
+            wall_at: None,
+        };
+        let week = Tank { used: 900_000, ..window }; // 90% used → nearly full
+        s.governor = Some(GovernorStatus { window, week: Some(week) });
+
+        // Throttle 0.4× → teal (heat 0, the whole point).
+        assert_eq!(tray_heat(&s, M::Throttle), Some(0.0));
+        // Rate view keeps per-bar load coloring.
+        assert_eq!(tray_heat(&s, M::Rate), None);
+        // Tank view: 20% used → low heat.
+        assert!((tray_heat(&s, M::Tank).unwrap() - 0.2).abs() < 1e-9);
+        // Week view: 90% used → hot (near red).
+        assert!(tray_heat(&s, M::Week).unwrap() > 0.85);
+
+        // A throttle over 1× pins red.
+        if let Some(g) = &mut s.governor {
+            g.window.delta = Some(1.4);
+        }
+        assert_eq!(tray_heat(&s, M::Throttle), Some(1.0));
     }
 
     #[test]

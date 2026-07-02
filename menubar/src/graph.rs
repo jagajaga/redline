@@ -4,10 +4,11 @@
 //!
 //! - [`render_tray`] — the menu-bar icon: a rounded translucent "well" (the
 //!   iStat signature frame, legible on both light and dark menu bars) holding a
-//!   histogram whose bars fade vertically like an area chart. **Color encodes
-//!   absolute load vs. the burn threshold** (teal → amber → red on the Apple
-//!   system palette); height is scaled to `max(window peak, burn)` so steady
-//!   moderate load reads as calm teal, not a wall of red.
+//!   histogram whose bars fade vertically like an area chart. **Height is the
+//!   burn history; color encodes the selected view's limit-proximity** (teal →
+//!   amber → red on the Apple system palette) — throttle by default, or tank /
+//!   week / rate depending on the Settings choice. Height is scaled to
+//!   `max(window peak, burn)` so steady moderate load stays a short bar.
 //! - [`render_spark`] — a wide per-session area sparkline used inside dropdown
 //!   submenus (macOS draws menu icons at 18 pt tall, aspect preserved).
 //!
@@ -118,8 +119,11 @@ fn in_rounded_rect(x: usize, y: usize, w: usize, h: usize, r: usize) -> bool {
     dx * dx + dy * dy <= r * r
 }
 
-/// The menu-bar icon. See module docs for the visual grammar.
-pub fn render_tray(samples: &[f64], burn: f64) -> Vec<u8> {
+/// The menu-bar icon. Bar heights are the burn history (activity over time);
+/// `heat` colors the bars by the selected view's limit-proximity (0 = teal /
+/// calm, 1 = red / at a limit). `heat: None` falls back to per-bar absolute
+/// load (the "Rate" view) — teal → amber → red vs the burn threshold.
+pub fn render_tray(samples: &[f64], burn: f64, heat: Option<f64>) -> Vec<u8> {
     let (w, h) = (ICON_W, ICON_H);
     let mut buf = vec![0u8; w * h * 4];
     let burn = if burn > 0.0 { burn } else { 1.0 };
@@ -148,7 +152,7 @@ pub fn render_tray(samples: &[f64], burn: f64) -> Vec<u8> {
         if bar_h == 0 {
             continue;
         }
-        let (r, g, b) = gradient(sample / burn);
+        let (r, g, b) = gradient(heat.unwrap_or(sample / burn));
         let top = PAD + usable_h - bar_h;
         for y in top..(PAD + usable_h) {
             // Vertical fade: bright at the tip, softer toward the base — the
@@ -240,7 +244,7 @@ mod tests {
 
     #[test]
     fn well_is_present_and_rounded() {
-        let buf = render_tray(&[], BURN);
+        let buf = render_tray(&[], BURN, None);
         // Center of the well: translucent but visible.
         let (_, _, _, a) = pixel(&buf, ICON_W, ICON_W / 2, ICON_H / 2);
         assert!(a > 0 && a < 120, "well should be translucent, alpha={a}");
@@ -257,7 +261,7 @@ mod tests {
 
     #[test]
     fn newest_sample_is_rightmost_and_right_aligned() {
-        let buf = render_tray(&[10_000.0], BURN);
+        let buf = render_tray(&[10_000.0], BURN, None);
         assert!(bar_fill(&buf, SLOTS - 1) > 0, "newest bar should be in last slot");
         assert_eq!(bar_fill(&buf, 0), 0, "left slots should be empty");
     }
@@ -266,7 +270,7 @@ mod tests {
     fn color_is_absolute_not_window_relative() {
         // Steady LOW load: must render teal (cool), not red — even though every
         // sample equals the window peak.
-        let buf = render_tray(&[5_000.0; 10], BURN);
+        let buf = render_tray(&[5_000.0; 10], BURN, None);
         let x = PAD + BAR_GAP + (SLOTS - 1) * (BAR_W + BAR_GAP);
         let y = (0..ICON_H)
             .find(|&y| pixel(&buf, ICON_W, x, y).3 > 120)
@@ -275,7 +279,7 @@ mod tests {
         assert!(b > r, "low load should be teal, got r={r} b={b}");
 
         // At/over burn → red.
-        let buf = render_tray(&[BURN * 1.5], BURN);
+        let buf = render_tray(&[BURN * 1.5], BURN, None);
         let y = (0..ICON_H)
             .find(|&y| pixel(&buf, ICON_W, x, y).3 > 120)
             .unwrap();
@@ -285,7 +289,7 @@ mod tests {
 
     #[test]
     fn height_scales_to_burn_when_below_threshold() {
-        let buf = render_tray(&[5_000.0; 5], BURN);
+        let buf = render_tray(&[5_000.0; 5], BURN, None);
         let full = (ICON_H - PAD * 2) * BAR_W;
         let fill = bar_fill(&buf, SLOTS - 1);
         assert!(fill < full / 2, "5k of 40k burn should be a short bar: {fill}/{full}");
@@ -293,7 +297,7 @@ mod tests {
 
     #[test]
     fn bars_fade_vertically() {
-        let buf = render_tray(&[BURN], BURN);
+        let buf = render_tray(&[BURN], BURN, None);
         let x = PAD + BAR_GAP + (SLOTS - 1) * (BAR_W + BAR_GAP);
         let top_a = pixel(&buf, ICON_W, x, PAD).3;
         let bottom_a = pixel(&buf, ICON_W, x, ICON_H - PAD - 1).3;
