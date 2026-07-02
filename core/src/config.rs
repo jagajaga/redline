@@ -30,6 +30,10 @@ pub struct Config {
     pub governor_window_budget: Option<u64>,
     /// Governor: self-set rolling hourly budget in billable tokens.
     pub governor_hourly_budget: Option<u64>,
+    /// Governor: weekly all-models budget. None → learned from weekly markers.
+    pub governor_week_budget: Option<u64>,
+    /// Governor: weekly Opus-only budget. None → learned.
+    pub governor_week_opus_budget: Option<u64>,
     /// Terminal app for "Open TUI dashboard" (empty → auto-detect).
     pub terminal_app: String,
 }
@@ -49,6 +53,8 @@ impl Default for Config {
             governor_window_hours: 5,
             governor_window_budget: None,
             governor_hourly_budget: None,
+            governor_week_budget: None,
+            governor_week_opus_budget: None,
             terminal_app: String::new(),
         }
     }
@@ -60,6 +66,9 @@ impl Config {
     pub fn retention_secs(&self) -> i64 {
         self.history_retain_secs
             .max(self.governor_window_hours * 3600 + 3600)
+            // Weekly tanks need ~9 days of buckets (7-day window + slack so a
+            // recent hit's 7-day measurement is fully covered).
+            .max(9 * 24 * 3600)
     }
 }
 
@@ -104,6 +113,16 @@ impl Config {
                 "governor_hourly_budget" | "hourly_budget" => {
                     if let Ok(n) = v.replace('_', "").parse() {
                         cfg.governor_hourly_budget = Some(n);
+                    }
+                }
+                "week_budget" | "governor_week_budget" => {
+                    if let Ok(n) = v.replace('_', "").parse() {
+                        cfg.governor_week_budget = Some(n);
+                    }
+                }
+                "week_opus_budget" | "governor_week_opus_budget" => {
+                    if let Ok(n) = v.replace('_', "").parse() {
+                        cfg.governor_week_opus_budget = Some(n);
                     }
                 }
                 "terminal_app" | "terminal" => cfg.terminal_app = v.to_string(),

@@ -24,12 +24,70 @@ WINDOW_MS = 5 * 60 * 1000   # rate window, matches core default
 IDLE_MS = 120 * 1000        # idle threshold, matches core default
 MAX_TAIL = 16 * 1024 * 1024  # cap transcript read for huge histories
 BUCKET_MS = 5 * 60 * 1000    # governor usage buckets
-HORIZON_MS = 6 * 3600 * 1000  # how far back buckets are reported
+HORIZON_MS = 9 * 24 * 3600 * 1000  # ~9 days: covers the weekly window
 
 # bucket_ts -> billable tokens, fed by every transcript scan
 USAGE_BUCKETS = {}
 # observed 429 timestamps (epoch ms) within the horizon
 RATE_LIMITS = []
+# opus-only billable buckets, and parsed limit-hit markers
+OPUS_BUCKETS = {}
+LIMIT_HITS = []
+
+
+def parse_reset(text, hit_ms):
+    """Best-effort '8pm (Europe/Paris)' / 'Jul 1 at 8pm (UTC)' -> epoch ms."""
+    try:
+        from zoneinfo import ZoneInfo
+    except Exception:
+        return None
+    import re as _re
+    m = _re.search(r"\(([^)]+)\)", text)
+    if not m:
+        return None
+    tzname = {"GMT": "UTC", "PST": "America/Los_Angeles", "PDT": "America/Los_Angeles",
+              "EST": "America/New_York", "EDT": "America/New_York",
+              "CET": "Europe/Paris", "CEST": "Europe/Paris"}.get(m.group(1).strip(), m.group(1).strip())
+    try:
+        tz = ZoneInfo(tzname)
+    except Exception:
+        return None
+    tm = _re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text.lower())
+    if not tm:
+        return None
+    h = int(tm.group(1)); mi = int(tm.group(2) or 0)
+    if tm.group(3) == "pm" and h != 12: h += 12
+    if tm.group(3) == "am" and h == 12: h = 0
+    from datetime import datetime, timezone
+    local = datetime.fromtimestamp(hit_ms / 1000, tz)
+    y, mo, d = local.year, local.month, local.day
+    months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"]
+    dm = _re.search(r"(" + "|".join(months) + r")\w*\s+(\d{1,2})", text.lower())
+    if dm:
+        mo = months.index(dm.group(1)) + 1; d = int(dm.group(2))
+    try:
+        return int(datetime(y, mo, d, h, mi, tzinfo=tz).timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def note_limit_marker(d, ts):
+    """Record 'hit your {weekly|session} limit · resets …' markers."""
+    m = d.get("message") or {}
+    c = m.get("content")
+    text = ""
+    if isinstance(c, str):
+        text = c
+    elif isinstance(c, list):
+        text = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+    if "hit your " not in text or "not your" in text:
+        return
+    rest = text.split("hit your ", 1)[1]
+    weekly = rest.startswith("weekly")
+    if not (weekly or rest.startswith("session")) or not ts:
+        return
+    reset_text = rest.split("resets", 1)[1].strip() if "resets" in rest else ""
+    LIMIT_HITS.append({"weekly": weekly, "at_ms": ts, "reset_ms": parse_reset(reset_text, ts)})
 AGENT_TOOLS = ("Agent", "Task", "Workflow")
 
 
@@ -162,6 +220,7 @@ def scan_transcript(path):
                 titles["custom"] = d["customTitle"]
             if d.get("apiErrorStatus") == 429 and ts and ts >= NOW_MS - HORIZON_MS:
                 RATE_LIMITS.append(ts)
+            note_limit_marker(d, ts)
             m = d.get("message") or {}
             content = m.get("content")
             # Agent lifecycle: launches in assistant turns, completions via
@@ -453,7 +512,9 @@ print(json.dumps({
     "sessions": sessions,
     "alerts": [],
     "usage_buckets": sorted(USAGE_BUCKETS.items()),
+    "opus_buckets": sorted(OPUS_BUCKETS.items()),
     "rate_limits": sorted(set(RATE_LIMITS)),
+    "limit_hits": LIMIT_HITS,
     "totals": {
         "active_sessions": len(sessions),
         "tokens_per_min": sum(s["tokens_per_min"] for s in sessions),

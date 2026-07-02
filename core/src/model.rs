@@ -238,6 +238,12 @@ pub struct Tank {
 pub struct GovernorStatus {
     pub window: Tank,
     pub cruise: Tank,
+    /// Weekly all-models tank (7-day window). `None` until there's data.
+    #[serde(default)]
+    pub week: Option<Tank>,
+    /// Weekly Opus-only tank (Max plans meter Opus separately).
+    #[serde(default)]
+    pub week_opus: Option<Tank>,
 }
 
 impl GovernorStatus {
@@ -356,9 +362,29 @@ pub struct Snapshot {
     /// they hard-anchor window boundaries and calibrate the budget.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rate_limits: Vec<i64>,
+    /// Opus-only billable usage buckets (subset of `usage_buckets`) — the
+    /// weekly Opus cap is metered separately on Max plans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opus_buckets: Vec<(i64, u64)>,
+    /// Parsed "you've hit your … limit · resets …" markers — authoritative
+    /// wall + reset events for the session and weekly clocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limit_hits: Vec<LimitHit>,
     /// Fuel-gauge readouts; computed by the daemon after merging all hosts.
     #[serde(default)]
     pub governor: Option<GovernorStatus>,
+}
+
+/// A parsed limit-hit marker: Claude Code told the user it hit a wall and when
+/// it resets. Authoritative — beats any inference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitHit {
+    /// true = weekly cap, false = 5-hour session window.
+    pub weekly: bool,
+    /// When the hit was recorded (epoch ms).
+    pub at_ms: i64,
+    /// Parsed reset instant (epoch ms), if we could resolve the timezone.
+    pub reset_ms: Option<i64>,
 }
 
 impl Snapshot {
@@ -370,6 +396,8 @@ impl Snapshot {
             totals: Totals::default(),
             usage_buckets: Vec::new(),
             rate_limits: Vec::new(),
+            opus_buckets: Vec::new(),
+            limit_hits: Vec::new(),
             governor: None,
         }
     }

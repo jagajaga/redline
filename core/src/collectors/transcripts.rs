@@ -50,6 +50,13 @@ pub enum TranscriptEvent {
     },
     /// An API 429 — a rate-limit hit, used to calibrate the plan-window budget.
     RateLimited { ts_ms: Option<i64> },
+    /// A "you've hit your {session|weekly} limit · resets …" message —
+    /// authoritative wall + reset text.
+    LimitMarker {
+        weekly: bool,
+        reset_text: String,
+        ts_ms: Option<i64>,
+    },
     /// A human-readable session title ("ai-title" / "custom-title" lines).
     Title { text: String, custom: bool },
     /// Any other tool call starting — in-flight until its tool_result arrives.
@@ -93,6 +100,27 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
     // Rate-limit hits are recorded on error-carrier lines of various types.
     if v.get("apiErrorStatus").and_then(Value::as_i64) == Some(429) {
         out.push(TranscriptEvent::RateLimited { ts_ms });
+    }
+
+    // Limit markers: "You've hit your weekly limit · resets 8pm (Europe/Paris)"
+    // / "…session limit · resets 1am (…)". Ignore "not your usage limit".
+    if let Some(text) = message_text(&v) {
+        if let Some(rest) = text.split("hit your ").nth(1) {
+            let weekly = rest.starts_with("weekly");
+            let session = rest.starts_with("session");
+            if (weekly || session) && !text.contains("not your") {
+                let reset_text = rest
+                    .split("resets")
+                    .nth(1)
+                    .map(|r| r.trim().trim_end_matches('.').to_string())
+                    .unwrap_or_default();
+                out.push(TranscriptEvent::LimitMarker {
+                    weekly,
+                    reset_text,
+                    ts_ms,
+                });
+            }
+        }
     }
 
     // Background-task completions arrive as task-notification blocks carrying
@@ -255,6 +283,27 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
     out
 }
 
+/// Concatenate the text blocks of a message (string content or a block array).
+fn message_text(v: &Value) -> Option<String> {
+    let content = v.get("message").and_then(|m| m.get("content"))?;
+    match content {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(blocks) => {
+            let mut out = String::new();
+            for b in blocks {
+                if b.get("type").and_then(Value::as_str) == Some("text") {
+                    if let Some(t) = b.get("text").and_then(Value::as_str) {
+                        out.push_str(t);
+                        out.push(' ');
+                    }
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        }
+        _ => None,
+    }
+}
+
 fn parse_usage(u: &Value) -> TokenLedger {
     let g = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
     let server = u.get("server_tool_use");
@@ -400,6 +449,23 @@ mod tests {
             e,
             TranscriptEvent::ToolResult { tool_use_id, notification: true } if tool_use_id == "toolu_bg"
         )));
+    }
+
+    #[test]
+    fn detects_limit_markers() {
+        let wk = r#"{"type":"assistant","timestamp":"2026-07-01T09:03:49.061Z","message":{"content":[{"type":"text","text":"You've hit your weekly limit · resets Jul 1 at 8pm (Europe/Paris)"}]}}"#;
+        let ev = parse_line(wk);
+        assert!(ev.iter().any(|e| matches!(e,
+            TranscriptEvent::LimitMarker { weekly: true, reset_text, .. }
+                if reset_text == "Jul 1 at 8pm (Europe/Paris)")));
+
+        let sess = r#"{"type":"assistant","timestamp":"2026-07-01T00:00:00.000Z","message":{"content":[{"type":"text","text":"You've hit your session limit · resets 1am (Europe/Paris)"}]}}"#;
+        assert!(parse_line(sess).iter().any(|e| matches!(e,
+            TranscriptEvent::LimitMarker { weekly: false, .. })));
+
+        // The overload 429 is explicitly NOT a usage limit.
+        let noise = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"API Error: Server is temporarily limiting requests (not your usage limit)"}]}}"#;
+        assert!(!parse_line(noise).iter().any(|e| matches!(e, TranscriptEvent::LimitMarker { .. })));
     }
 
     #[test]

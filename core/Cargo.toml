@@ -11,4 +11,5 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 sysinfo = "0.33"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = { version = "0.9", default-features = false }
 dirs = "5"

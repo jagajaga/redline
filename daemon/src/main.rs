@@ -45,13 +45,17 @@ fn main() -> anyhow::Result<()> {
 
     std::fs::create_dir_all(paths.ccwatch_dir())?;
 
-    // Refuse to double-launch.
-    if let Some(pid) = read_pidfile(&paths) {
-        if actions::alive(pid) {
+    // Refuse to double-launch only if a daemon actually answers the socket —
+    // a live pid alone can be a reused pid with a stale pidfile.
+    if std::os::unix::net::UnixStream::connect(paths.socket()).is_ok() {
+        if let Some(pid) = read_pidfile(&paths) {
             eprintln!("ccwatchd already running (pid {pid})");
-            return Ok(());
+        } else {
+            eprintln!("ccwatchd socket already active");
         }
+        return Ok(());
     }
+    let _ = std::fs::remove_file(paths.socket()); // clear any stale socket
     std::fs::write(paths.pidfile(), std::process::id().to_string())?;
 
     // Fresh socket.
@@ -157,7 +161,7 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
             }
-            let g = ccwatch_core::governor::compute(
+            let mut g = ccwatch_core::governor::compute(
                 &snap.usage_buckets,
                 &snap.rate_limits,
                 snap.generated_at,
@@ -165,6 +169,26 @@ fn main() -> anyhow::Result<()> {
                 learned.map(|l| l.tokens),
             );
             if let Some(alert) = ccwatch_core::governor::wall_alert(&g, snap.generated_at) {
+                snap.alerts.push(alert);
+            }
+            // Weekly tanks (all-models + Opus), from limit markers + buckets.
+            g.week = ccwatch_core::governor::weekly_tank(
+                &snap.usage_buckets,
+                &snap.limit_hits,
+                snap.generated_at,
+                config.governor_week_budget,
+                false,
+            );
+            g.week_opus = ccwatch_core::governor::weekly_tank(
+                &snap.opus_buckets,
+                &snap.limit_hits,
+                snap.generated_at,
+                config.governor_week_opus_budget,
+                true,
+            );
+            if let Some(alert) =
+                ccwatch_core::governor::weekly_wall_alert(&g, snap.generated_at)
+            {
                 snap.alerts.push(alert);
             }
             snap.governor = Some(g);

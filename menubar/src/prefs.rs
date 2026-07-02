@@ -17,16 +17,19 @@ pub enum TitleMode {
     Range,
     /// Plan-window tank remaining: "71%".
     Tank,
+    /// Weekly tank remaining: "wk 58%".
+    Week,
     /// Graph only, no text.
     Nothing,
 }
 
 impl TitleMode {
-    pub const ALL: [TitleMode; 5] = [
+    pub const ALL: [TitleMode; 6] = [
         TitleMode::Throttle,
         TitleMode::Rate,
         TitleMode::Range,
         TitleMode::Tank,
+        TitleMode::Week,
         TitleMode::Nothing,
     ];
 
@@ -36,6 +39,7 @@ impl TitleMode {
             TitleMode::Rate => "Burn rate (52k)",
             TitleMode::Range => "Range (1h38m)",
             TitleMode::Tank => "Tank (71%)",
+            TitleMode::Week => "Weekly (wk 58%)",
             TitleMode::Nothing => "Graph only",
         }
     }

@@ -103,7 +103,9 @@ becomes an alert — not a silent gap.
 ```toml
 # ~/.claude/ccwatch/config.toml — all optional
 hourly_budget = 3_000_000     # personal cruise budget, tokens/hour
-#window_budget = 200_000_000  # plan window; unset → learned from 429s
+#window_budget = 200_000_000  # 5h plan window; unset → learned from 429s
+#week_budget = 600_000_000    # weekly cap; unset → learned from limit markers
+#week_opus_budget = 550_000_000  # weekly Opus cap; unset → learned
 terminal = "iTerm"            # for "Open TUI dashboard"
 burn_tokens_per_min = 40000   # where the graph turns red
 ```

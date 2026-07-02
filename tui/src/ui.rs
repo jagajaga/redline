@@ -55,13 +55,23 @@ fn governor_segment(app: &App) -> String {
     } else {
         format!("▼{delta:.1}×")
     };
-    match w.wall_at {
-        Some(wall) => format!(
-            " · {arrow} wall {}",
-            format::duration_ms(wall - app.now_ms)
-        ),
+    let mut seg = match w.wall_at {
+        Some(wall) => format!(" · {arrow} wall {}", format::duration_ms(wall - app.now_ms)),
         None => format!(" · {arrow}"),
+    };
+    if let Some(t) = &g.week {
+        if let Some(b) = t.budget {
+            let pct = 100.0 - (t.used as f64 / b as f64 * 100.0).min(100.0);
+            seg.push_str(&format!(" · wk {pct:.0}%"));
+        }
     }
+    if let Some(t) = &g.week_opus {
+        if let Some(b) = t.budget {
+            let pct = 100.0 - (t.used as f64 / b as f64 * 100.0).min(100.0);
+            seg.push_str(&format!(" · opus {pct:.0}%"));
+        }
+    }
+    seg
 }
 
 fn draw_topbar(f: &mut Frame, area: Rect, app: &App) {
@@ -1095,6 +1105,8 @@ mod tests {
         snap.governor = Some(ccwatch_core::model::GovernorStatus {
             window: tank,
             cruise: tank,
+            week: None,
+            week_opus: None,
         });
         snap.alerts = vec![
             Alert { severity: Severity::Critical, kind: AlertKind::RunawayLoop, subject: "webapp".into(), session_id: "s1".into(), message: "62k tok/min · no user turn 7m · agent×2".into(), since_ms: 0 },
@@ -1197,7 +1209,7 @@ mod tests {
             range_min: Some(50.0),
             wall_at: Some(10_000 + 50 * 60_000),
         };
-        snap.governor = Some(GovernorStatus { window: tank, cruise: tank });
+        snap.governor = Some(GovernorStatus { window: tank, cruise: tank, week: None, week_opus: None });
         let app = app_with(snap);
         let s = render(&app);
         assert!(s.contains("▲3.6×"), "delta missing from top bar:\n{s}");

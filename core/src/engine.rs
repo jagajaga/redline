@@ -24,6 +24,7 @@ struct TokenEvent {
     total: u64,
     input: u64,
     cache_read: u64,
+    opus: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -216,6 +217,8 @@ pub struct Engine {
     last_full_scan: i64,
     /// agent sidechain path -> launching tool_use id (from its meta.json).
     agent_meta: HashMap<PathBuf, Option<String>>,
+    /// Parsed limit-hit markers (session + weekly), pruned to ~2 weeks.
+    limit_hits: Vec<crate::model::LimitHit>,
 }
 
 impl Engine {
@@ -231,6 +234,7 @@ impl Engine {
             last_ended_scan: -1,
             last_full_scan: -1,
             agent_meta: HashMap::new(),
+            limit_hits: Vec::new(),
         }
     }
 
@@ -318,6 +322,9 @@ impl Engine {
                 break;
             }
         }
+        // Keep limit-hit markers for two weeks (weekly window + slack).
+        let hit_cutoff = now_ms - 15 * 24 * 3_600_000;
+        self.limit_hits.retain(|h| h.at_ms >= hit_cutoff);
 
         let mut out_sessions = Vec::new();
         let mut alerts = Vec::new();
@@ -506,11 +513,14 @@ impl Engine {
             accum.prune(now_ms, self.config.retention_secs());
         }
         let mut bucket_map: std::collections::BTreeMap<i64, u64> = Default::default();
+        let mut opus_map: std::collections::BTreeMap<i64, u64> = Default::default();
         for accum in self.accums.values() {
             for e in &accum.events {
-                *bucket_map
-                    .entry(crate::governor::bucket_of(e.ts_ms))
-                    .or_insert(0) += e.total;
+                let b = crate::governor::bucket_of(e.ts_ms);
+                *bucket_map.entry(b).or_insert(0) += e.total;
+                if e.opus {
+                    *opus_map.entry(b).or_insert(0) += e.total;
+                }
             }
         }
 
@@ -521,6 +531,8 @@ impl Engine {
             totals,
             usage_buckets: bucket_map.into_iter().collect(),
             rate_limits: self.rate_limit_ts(),
+            opus_buckets: opus_map.into_iter().collect(),
+            limit_hits: self.limit_hits.clone(),
             governor: None,
         }
     }
@@ -633,6 +645,11 @@ impl Engine {
                                 total: usage.billable(),
                                 input: usage.input,
                                 cache_read: usage.cache_read,
+                                opus: accum
+                                    .model
+                                    .as_deref()
+                                    .map(|m| m.contains("opus"))
+                                    .unwrap_or(false),
                             });
                         }
                     }
@@ -688,6 +705,15 @@ impl Engine {
                     TranscriptEvent::RateLimited { ts_ms } => {
                         if let Some(ts) = ts_ms {
                             self.rate_limits.push_back(ts);
+                        }
+                    }
+                    TranscriptEvent::LimitMarker { weekly, reset_text, ts_ms } => {
+                        if let Some(ts) = ts_ms {
+                            let reset_ms = crate::governor::parse_reset(&reset_text, ts);
+                            let hit = crate::model::LimitHit { weekly, at_ms: ts, reset_ms };
+                            if !self.limit_hits.contains(&hit) {
+                                self.limit_hits.push(hit);
+                            }
                         }
                     }
                     TranscriptEvent::ScheduleWakeup {
@@ -798,6 +824,11 @@ impl Engine {
                                     total: usage.billable(),
                                     input: usage.input,
                                     cache_read: usage.cache_read,
+                                    opus: data
+                                        .model
+                                        .as_deref()
+                                        .map(|m| m.contains("opus"))
+                                        .unwrap_or(false),
                                 };
                                 data.events.push_back(te);
                                 // Roll up into the parent session: subagent
@@ -808,25 +839,21 @@ impl Engine {
                                     Some(ts.max(accum.last_activity.unwrap_or(0)));
                             }
                         }
-                        TranscriptEvent::ToolStart { id, name, detail, ts_ms } => {
-                            if let Some(ts) = ts_ms {
-                                accum
-                                    .agent_data
-                                    .entry(tool_use_id.clone())
-                                    .or_default()
-                                    .pending
-                                    .insert(id, (name, detail, ts));
-                            }
+                        TranscriptEvent::ToolStart { id, name, detail, ts_ms: Some(ts) } => {
+                            accum
+                                .agent_data
+                                .entry(tool_use_id.clone())
+                                .or_default()
+                                .pending
+                                .insert(id, (name, detail, ts));
                         }
                         TranscriptEvent::ToolResult { tool_use_id: rid, .. } => {
                             if let Some(data) = accum.agent_data.get_mut(&tool_use_id) {
                                 data.pending.remove(&rid);
                             }
                         }
-                        TranscriptEvent::RateLimited { ts_ms } => {
-                            if let Some(ts) = ts_ms {
-                                self.rate_limits.push_back(ts);
-                            }
+                        TranscriptEvent::RateLimited { ts_ms: Some(ts) } => {
+                            self.rate_limits.push_back(ts);
                         }
                         _ => {}
                     }

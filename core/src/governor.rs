@@ -11,8 +11,13 @@
 //! Pure functions over explicit `now_ms` so every edge is unit-testable.
 
 use crate::config::Config;
-use crate::model::{Alert, AlertKind, BudgetSource, GovernorStatus, Severity, Tank};
+use crate::model::{Alert, AlertKind, BudgetSource, GovernorStatus, LimitHit, Severity, Tank};
+use chrono::{Datelike, TimeZone, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
+
+/// A weekly window is 7 days.
+pub const WEEK_MS: i64 = 7 * 24 * 3_600_000;
 
 pub const BUCKET_MS: i64 = 5 * 60 * 1000;
 /// Delta ceiling: JSON cannot represent infinity (serde encodes it as null),
@@ -235,7 +240,138 @@ pub fn compute(
         ),
     };
 
-    GovernorStatus { window, cruise }
+    GovernorStatus {
+        window,
+        cruise,
+        week: None,
+        week_opus: None,
+    }
+}
+
+/// Resolve a "resets …" marker into an epoch. Handles "8pm (Europe/Paris)",
+/// "Jul 1 at 8pm (Europe/Paris)", "6pm (UTC)". Best-effort: `None` if the
+/// timezone can't be resolved (caller falls back to a rolling window).
+pub fn parse_reset(text: &str, hit_ms: i64) -> Option<i64> {
+    // Timezone in parentheses.
+    let tz_name = text.split('(').nth(1)?.split(')').next()?.trim();
+    let alias = match tz_name {
+        "GMT" => "UTC",
+        "PST" | "PDT" => "America/Los_Angeles",
+        "EST" | "EDT" => "America/New_York",
+        "CET" | "CEST" => "Europe/Paris",
+        other => other,
+    };
+    let tz: Tz = alias.parse().ok()?;
+
+    let lower = text.to_lowercase();
+    // Time: "8pm", "8:30pm", "1am".
+    let (hour, minute) = parse_clock(&lower)?;
+
+    let hit_local = Utc.timestamp_millis_opt(hit_ms).single()?.with_timezone(&tz);
+    // Optional date "Jul 1".
+    let (year, month, day) = match parse_month_day(&lower) {
+        Some((mo, d)) => (hit_local.year(), mo, d),
+        None => (hit_local.year(), hit_local.month(), hit_local.day()),
+    };
+    let dt = tz
+        .with_ymd_and_hms(year, month, day, hour, minute, 0)
+        .single()?;
+    Some(dt.timestamp_millis())
+}
+
+fn parse_clock(s: &str) -> Option<(u32, u32)> {
+    // Position of the am/pm token (not merely the first 'a'/'p').
+    let i = (0..s.len())
+        .find(|&i| s.is_char_boundary(i) && (s[i..].starts_with("am") || s[i..].starts_with("pm")))?;
+    let pm = s[i..].starts_with("pm");
+    // Walk back over the "H" or "H:MM" immediately before the am/pm.
+    let head = &s[..i];
+    let tok: String = head.chars().rev().take_while(|c| c.is_ascii_digit() || *c == ':').collect::<String>().chars().rev().collect();
+    let mut parts = tok.split(':');
+    let mut h: u32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    if pm && h != 12 { h += 12; }
+    if !pm && h == 12 { h = 0; }
+    (h < 24).then_some((h, m))
+}
+
+fn parse_month_day(s: &str) -> Option<(u32, u32)> {
+    const MONTHS: [&str; 12] = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+    for (i, mo) in MONTHS.iter().enumerate() {
+        if let Some(pos) = s.find(mo) {
+            let after = &s[pos + 3..];
+            let day: String = after.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(d) = day.parse::<u32>() {
+                if (1..=31).contains(&d) {
+                    return Some((i as u32 + 1, d));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Learn a weekly budget from limit markers of a given kind: each hit
+/// measures the usage over the 7 days before it; the newest hit sets it.
+pub fn learn_weekly(buckets: &[(i64, u64)], hits: &[LimitHit], weekly: bool) -> Option<(u64, i64)> {
+    let mut best: Option<(u64, i64)> = None;
+    for h in hits.iter().filter(|h| h.weekly == weekly) {
+        let used = sum_range(buckets, h.at_ms - WEEK_MS, h.at_ms);
+        if used > 0 && best.map(|(_, at)| h.at_ms > at).unwrap_or(true) {
+            best = Some((used, h.at_ms));
+        }
+    }
+    best
+}
+
+/// The next weekly reset at or after `now`, from the newest hit that carries a
+/// parsed reset instant, stepped by whole weeks.
+pub fn weekly_reset_after(hits: &[LimitHit], now_ms: i64) -> Option<i64> {
+    let anchor = hits
+        .iter()
+        .filter(|h| h.weekly)
+        .filter_map(|h| h.reset_ms.map(|r| (h.at_ms, r)))
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, r)| r)?;
+    let mut r = anchor;
+    while r <= now_ms {
+        r += WEEK_MS;
+    }
+    // Also step back if the anchor is far in the future for some reason.
+    while r - WEEK_MS > now_ms {
+        r -= WEEK_MS;
+    }
+    Some(r)
+}
+
+/// Build a weekly tank (all-models or Opus). `budget` is config-or-learned.
+pub fn weekly_tank(
+    buckets: &[(i64, u64)],
+    hits: &[LimitHit],
+    now_ms: i64,
+    cfg_budget: Option<u64>,
+    weekly_opus: bool,
+) -> Option<Tank> {
+    // Reset anchor: parsed marker, else a rolling 7-day horizon.
+    let reset = weekly_reset_after(hits, now_ms);
+    let (start, resets_at) = match reset {
+        Some(r) => (r - WEEK_MS, Some(r)),
+        None => (now_ms - WEEK_MS, None),
+    };
+    let used = sum_range(buckets, start, now_ms);
+    let (budget, source) = match (cfg_budget, learn_weekly(buckets, hits, !weekly_opus).map(|(b, _)| b)) {
+        (Some(b), _) => (Some(b), BudgetSource::Config),
+        (None, Some(b)) => (Some(b), BudgetSource::Learned),
+        _ => (None, BudgetSource::Unknown),
+    };
+    // Nothing to show if there's neither usage nor a budget nor a reset.
+    if used == 0 && budget.is_none() && resets_at.is_none() {
+        return None;
+    }
+    // Rate uses the recent 5-min burn (consistent with the other tanks).
+    let rate = sum_range(buckets, now_ms - RATE_WINDOW_MS, now_ms) as f64
+        / (RATE_WINDOW_MS as f64 / 60_000.0);
+    Some(make_tank(used, budget, source, start, resets_at, rate, now_ms))
 }
 
 /// The BudgetWall alert when the wall lands before the reset.
@@ -343,6 +479,36 @@ pub fn learn(
         }
     }
     best
+}
+
+/// Alert when a weekly tank will empty before its reset.
+pub fn weekly_wall_alert(g: &GovernorStatus, now_ms: i64) -> Option<Alert> {
+    for (tank, label) in [
+        (g.week.as_ref(), "weekly limit"),
+        (g.week_opus.as_ref(), "weekly Opus limit"),
+    ] {
+        let Some(t) = tank else { continue };
+        let (Some(wall), Some(reset)) = (t.wall_at, t.resets_at) else {
+            continue;
+        };
+        if t.rate_per_min < 1.0 {
+            continue;
+        }
+        let days = (reset - now_ms) as f64 / 86_400_000.0;
+        let to_wall_h = (wall - now_ms) as f64 / 3_600_000.0;
+        return Some(Alert {
+            severity: Severity::Critical,
+            kind: AlertKind::BudgetWall,
+            subject: label.into(),
+            session_id: String::new(),
+            message: format!(
+                "at this pace you hit the {label} in ~{:.0}h — {:.1}d before reset",
+                to_wall_h, days
+            ),
+            since_ms: now_ms,
+        });
+    }
+    None
 }
 
 #[cfg(test)]
@@ -535,6 +701,54 @@ mod tests {
         let g = compute(&b, &[], NOW, &c, None);
         assert!(g.window.delta.unwrap() >= DELTA_EMPTY);
         assert_eq!(g.window.range_min, Some(0.0));
+    }
+
+    #[test]
+    fn parse_reset_handles_common_forms() {
+        // Jul 1 2026 20:00 Europe/Paris = 18:00 UTC.
+        let hit = chrono::Utc
+            .with_ymd_and_hms(2026, 7, 1, 9, 0, 0)
+            .unwrap()
+            .timestamp_millis();
+        let r = parse_reset("Jul 1 at 8pm (Europe/Paris)", hit).unwrap();
+        let utc = chrono::Utc.timestamp_millis_opt(r).unwrap();
+        assert_eq!(utc.format("%Y-%m-%dT%H:%MZ").to_string(), "2026-07-01T18:00Z");
+
+        // Bare time uses the hit's local date; 1am Paris = 23:00 UTC prev day
+        // relative to a 09:00 UTC (11:00 Paris) hit → same Paris day.
+        let r2 = parse_reset("1am (Europe/Paris)", hit).unwrap();
+        let u2 = chrono::Utc.timestamp_millis_opt(r2).unwrap();
+        assert_eq!(u2.format("%H:%MZ").to_string(), "23:00Z");
+
+        // UTC and unknown tz.
+        assert!(parse_reset("6pm (UTC)", hit).is_some());
+        assert!(parse_reset("8pm (Nowhere/Nope)", hit).is_none());
+    }
+
+    #[test]
+    fn weekly_tank_learns_budget_and_anchors_reset() {
+        // A weekly hit 2 days ago with a known reset 5 days from now; usage
+        // in the 7 days before the hit measured the budget at 400M.
+        let hit_at = NOW - 2 * 24 * H;
+        let reset = NOW + 5 * 24 * H;
+        let hits = vec![LimitHit { weekly: true, at_ms: hit_at, reset_ms: Some(reset) }];
+        // Buckets: 400M spread before the hit, 60M since.
+        let b = buckets(&[
+            (6 * 24 * 60, 200_000_000),
+            (4 * 24 * 60, 200_000_000),
+            (24 * 60, 60_000_000),
+        ]);
+        let t = weekly_tank(&b, &hits, NOW, None, false).unwrap();
+        assert_eq!(t.budget, Some(400_000_000));
+        assert_eq!(t.budget_source, BudgetSource::Learned);
+        assert_eq!(t.resets_at, Some(reset));
+        // used = last-7-days sum = everything after (reset-7d).
+        assert!(t.used > 0);
+
+        // Config overrides the learned value.
+        let t2 = weekly_tank(&b, &hits, NOW, Some(999_000_000), false).unwrap();
+        assert_eq!(t2.budget, Some(999_000_000));
+        assert_eq!(t2.budget_source, BudgetSource::Config);
     }
 
     #[test]

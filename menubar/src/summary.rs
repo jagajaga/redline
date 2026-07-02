@@ -85,6 +85,16 @@ pub fn tray_title(s: &Snapshot, connected: bool, mode: crate::prefs::TitleMode) 
                     .map(|b| format!("{:.0}%", 100.0 - (w.used as f64 / b as f64 * 100.0).min(100.0)))
             })
             .unwrap_or_else(|| "—".into()),
+        M::Week => s
+            .governor
+            .as_ref()
+            .and_then(|g| g.week.as_ref())
+            .and_then(|t| {
+                t.budget.map(|b| {
+                    format!("wk {:.0}%", 100.0 - (t.used as f64 / b as f64 * 100.0).min(100.0))
+                })
+            })
+            .unwrap_or_else(|| "wk —".into()),
         M::Nothing => String::new(),
     };
     // Alerts always stay visible next to whatever the mode shows.
@@ -132,7 +142,37 @@ pub fn governor_line(s: &Snapshot) -> String {
             delta_str(d)
         ));
     }
+    if let Some(t) = &g.week {
+        parts.push(week_str("wk", t));
+    }
+    if let Some(t) = &g.week_opus {
+        parts.push(week_str("opus wk", t));
+    }
     parts.join(" · ")
+}
+
+/// Weekly readout: "wk 62% · resets Tue 20:00" (or used-only if no budget).
+fn week_str(label: &str, t: &ccwatch_core::model::Tank) -> String {
+    let mut s = match t.budget {
+        Some(b) => {
+            let pct = 100.0 - (t.used as f64 / b as f64 * 100.0).min(100.0);
+            let tag = if t.budget_source == ccwatch_core::model::BudgetSource::Learned { "~" } else { "" };
+            format!("{label} {tag}{pct:.0}%")
+        }
+        None => format!("{label} {}", tokens(t.used)),
+    };
+    if let Some(r) = t.resets_at {
+        s.push_str(&format!(" (resets {})", weekday_clock(r)));
+    }
+    s
+}
+
+fn weekday_clock(ms: i64) -> String {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_millis_opt(ms).single() {
+        Some(dt) => dt.format("%a %H:%M").to_string(),
+        None => "?".into(),
+    }
 }
 
 pub fn tooltip(s: &Snapshot) -> String {
@@ -482,12 +522,13 @@ mod tests {
             range_min: Some(50.0),
             wall_at: Some(3_000_000),
         };
-        s.governor = Some(GovernorStatus { window: tank, cruise: tank });
+        s.governor = Some(GovernorStatus { window: tank, cruise: tank, week: None, week_opus: None });
         use crate::prefs::TitleMode as M;
         assert_eq!(tray_title(&s, true, M::Throttle), "▲3.6×");
         assert_eq!(tray_title(&s, true, M::Rate), "46k");
         assert_eq!(tray_title(&s, true, M::Range), "50m");
         assert_eq!(tray_title(&s, true, M::Tank), "50%");
+        assert_eq!(tray_title(&s, true, M::Week), "wk —");
         assert_eq!(tray_title(&s, true, M::Nothing), "");
         // Alerts still win.
         s.alerts.push(Alert {
@@ -527,7 +568,7 @@ mod tests {
         window.budget = Some(1_000_000);
         window.used = 620_000;
         window.delta = Some(2.0);
-        s.governor = Some(GovernorStatus { window, cruise });
+        s.governor = Some(GovernorStatus { window, cruise, week: None, week_opus: None });
         let line = governor_line(&s);
         assert!(line.contains("throttle ▲2.0×"), "{line}");
         assert!(line.contains("range 1h38m"), "{line}");
