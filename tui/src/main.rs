@@ -145,6 +145,10 @@ fn handle_key(app: &mut App, paths: &Paths, code: KeyCode) {
                 app.hide_done = !app.hide_done;
                 app.move_selection(0);
             }
+            KeyCode::Char('s') => {
+                app.sort = app.sort.next();
+                app.status = Some(format!("sorted by {}", app.sort.label()));
+            }
             KeyCode::Up => app.move_selection(-1),
             KeyCode::Down => app.move_selection(1),
             KeyCode::Enter | KeyCode::Right | KeyCode::Left | KeyCode::Char(' ') => {

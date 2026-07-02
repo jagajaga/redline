@@ -34,6 +34,38 @@ pub struct JumpItem {
     pub agent_path: Vec<String>,
 }
 
+/// Session-list sort order, cycled with `s`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortBy {
+    Burn,
+    LastActive,
+    Name,
+    Cpu,
+    Rss,
+}
+
+impl SortBy {
+    pub fn next(self) -> Self {
+        match self {
+            SortBy::Burn => SortBy::LastActive,
+            SortBy::LastActive => SortBy::Name,
+            SortBy::Name => SortBy::Cpu,
+            SortBy::Cpu => SortBy::Rss,
+            SortBy::Rss => SortBy::Burn,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SortBy::Burn => "tok/min",
+            SortBy::LastActive => "last active",
+            SortBy::Name => "name",
+            SortBy::Cpu => "cpu",
+            SortBy::Rss => "rss",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingAction {
     pub request: ActionRequest,
@@ -61,6 +93,7 @@ pub struct App {
     pub hide_idle: bool,
     /// Hide finished agents from the tree (history vs. live view).
     pub hide_done: bool,
+    pub sort: SortBy,
     pub mode: Mode,
     pub should_quit: bool,
     pub now_ms: i64,
@@ -79,6 +112,7 @@ impl App {
             selected: 0,
             hide_idle: false,
             hide_done: false,
+            sort: SortBy::Burn,
             mode: Mode::Normal,
             should_quit: false,
             now_ms,
@@ -93,9 +127,10 @@ impl App {
         self.reconcile_selection();
     }
 
-    /// Sessions honoring the idle filter.
+    /// Sessions honoring the idle filter, ordered by the active sort.
     pub fn sessions(&self) -> Vec<(usize, &Session)> {
-        self.snapshot
+        let mut out: Vec<(usize, &Session)> = self
+            .snapshot
             .sessions
             .iter()
             .enumerate()
@@ -106,7 +141,25 @@ impl App {
                     || !matches!(s.state, ccwatch_core::model::SessionState::Idle)
                     || s.tokens_per_min >= 1.0
             })
-            .collect()
+            .collect();
+        match self.sort {
+            SortBy::Burn => out.sort_by(|a, b| {
+                b.1.tokens_per_min
+                    .partial_cmp(&a.1.tokens_per_min)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            SortBy::LastActive => {
+                out.sort_by_key(|(_, s)| std::cmp::Reverse(s.last_activity.unwrap_or(0)))
+            }
+            SortBy::Name => out.sort_by(|a, b| a.1.name.cmp(&b.1.name)),
+            SortBy::Cpu => out.sort_by(|a, b| {
+                b.1.cpu_pct
+                    .partial_cmp(&a.1.cpu_pct)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            SortBy::Rss => out.sort_by_key(|(_, s)| std::cmp::Reverse(s.rss_mb)),
+        }
+        out
     }
 
     /// Flatten sessions and (expanded) agent trees into display rows.
@@ -640,6 +693,30 @@ mod tests {
         app.stage_action(ActionKind::Pause);
         assert!(matches!(app.mode, Mode::Normal));
         assert!(app.status.as_deref().unwrap_or("").contains("local-only"));
+    }
+
+    #[test]
+    fn sort_cycles_and_reorders() {
+        let mut a = session("s1", "zebra", vec![]);
+        a.tokens_per_min = 50_000.0;
+        a.last_activity = Some(1_000);
+        let mut b = session("s2", "alpha", vec![]);
+        b.tokens_per_min = 1_000.0;
+        b.last_activity = Some(9_000);
+        let mut app = app_with(snapshot(vec![a, b]));
+
+        // Default: burn desc → zebra first.
+        assert_eq!(app.sessions()[0].1.name, "zebra");
+        // Cycle to last-active → alpha (more recent) first.
+        app.sort = app.sort.next();
+        assert_eq!(app.sort, SortBy::LastActive);
+        assert_eq!(app.sessions()[0].1.name, "alpha");
+        // Cycle to name → alpha first alphabetically.
+        app.sort = app.sort.next();
+        assert_eq!(app.sessions()[0].1.name, "alpha");
+        // Full cycle returns to burn.
+        app.sort = app.sort.next().next().next();
+        assert_eq!(app.sort, SortBy::Burn);
     }
 
     #[test]

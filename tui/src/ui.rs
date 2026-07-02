@@ -155,6 +155,7 @@ struct Widths {
     host: usize,
     state: usize,
     up: usize,
+    last: usize,
     tpm: usize,
     breakdown: usize,
     cpu: usize,
@@ -165,16 +166,25 @@ impl Widths {
     fn for_width(inner_width: usize) -> Self {
         let mut w = Widths {
             name: 24,
-            host: 13,
+            host: 12,
             state: 8,
-            up: 8,
+            up: 7,
+            last: 7,
             tpm: 8,
             breakdown: 27,
             cpu: 5,
             rss: 6,
         };
         const MODEL_RESERVE: usize = 12;
-        let base = w.name + w.host + w.state + w.up + w.tpm + w.breakdown + w.cpu + w.rss;
+        let base = w.name
+            + w.host
+            + w.state
+            + w.up
+            + w.last
+            + w.tpm
+            + w.breakdown
+            + w.cpu
+            + w.rss;
         let mut extra = inner_width.saturating_sub(base + MODEL_RESERVE);
         let mut grow = |slot: &mut usize, by: usize| {
             let g = by.min(extra);
@@ -205,17 +215,27 @@ fn selection_style() -> Style {
     Style::default().bg(Color::Rgb(36, 52, 84))
 }
 
-fn header_line(w: &Widths) -> Line<'static> {
+fn header_line(w: &Widths, sort: crate::app::SortBy) -> Line<'static> {
+    use crate::app::SortBy;
+    // The active sort column gets a ▾ marker.
+    let mark = |label: &str, this: SortBy| {
+        if sort == this {
+            format!("{label}▾")
+        } else {
+            label.to_string()
+        }
+    };
     let text = format!(
-        "{}{}{}{}{}{}{}{}model",
-        cell("  name/desc", w.name),
+        "{}{}{}{}{}{}{}{}{}model",
+        cell(&format!("  {}", mark("name/desc", SortBy::Name)), w.name),
         cell("host", w.host),
         cell("state", w.state),
         cell("up", w.up),
-        cell_r("tok/min", w.tpm),
+        cell(&mark("last", SortBy::LastActive), w.last),
+        cell_r(&mark("tok/min", SortBy::Burn), w.tpm),
         cell("in/out/cw/cr", w.breakdown),
-        cell_r("cpu", w.cpu),
-        cell_r("rss", w.rss),
+        cell_r(&mark("cpu", SortBy::Cpu), w.cpu),
+        cell_r(&mark("rss", SortBy::Rss), w.rss),
     );
     Line::from(Span::styled(
         text,
@@ -235,7 +255,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     let chunks =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
     // Header row rendered by the same cell code as the data → exact alignment.
-    f.render_widget(Paragraph::new(header_line(&w)), chunks[0]);
+    f.render_widget(Paragraph::new(header_line(&w, app.sort)), chunks[0]);
 
     let list_h = chunks[1].height as usize;
     let start = if app.selected >= list_h {
@@ -330,6 +350,10 @@ fn session_line(s: &Session, app: &App, w: &Widths) -> Line<'static> {
     } else {
         "▸ "
     };
+    let last = s
+        .last_activity
+        .map(|t| format::ago(t, app.now_ms))
+        .unwrap_or_else(|| "-".into());
     Line::from(vec![
         Span::styled(
             cell(&format!("{expand}{}", s.name), w.name),
@@ -338,6 +362,7 @@ fn session_line(s: &Session, app: &App, w: &Widths) -> Line<'static> {
         host_cell(&s.host, w),
         state_span(s.state, w),
         Span::raw(cell(&up, w.up)),
+        Span::styled(cell(&last, w.last), Style::default().fg(Color::Gray)),
         burn_span(s.tokens_per_min, BURN_RED, w),
         Span::styled(cell(&breakdown, w.breakdown), Style::default().fg(Color::Gray)),
         Span::raw(cell_r(&format!("{:.0}%", s.cpu_pct), w.cpu)),
@@ -599,7 +624,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Mode::Confirm(_) => " y confirm · n/esc cancel ",
         Mode::Details => " esc/d close ",
         Mode::Normal => {
-            " / jump · ↑↓ · enter expand · d details · x hide-done · f hide-idle · k kill · p pause · r resume · q quit "
+            " / jump · ↑↓ · enter expand · d details · s sort · x hide-done · f hide-idle · k kill · p pause · r resume · q quit "
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::Black).bg(Color::Gray))];

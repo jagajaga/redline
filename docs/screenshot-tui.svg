@@ -17,44 +17,45 @@
 <text x="14.0" y="120.0" xml:space="preserve" fill="#cdd6f4">└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text>
 <text x="14.0" y="138.0" xml:space="preserve" fill="#cdd6f4">┌ SESSIONS / AGENTS ─────────────────────────────────────────────────────────────────────────────────────────────────┐</text>
 <text x="14.0" y="156.0" xml:space="preserve" fill="#cdd6f4">│</text>
-<text x="22.4" y="156.0" xml:space="preserve" fill="#6c7086">  name/desc             host         state   up      tok/min in/out/cw/cr                     cpu   rss model</text>
+<text x="22.4" y="156.0" xml:space="preserve" fill="#6c7086">  name/desc             host        state   up     last   tok/mi… in/out/cw/cr                cpu   rss model</text>
 <text x="938.0" y="156.0" xml:space="preserve" fill="#cdd6f4">       │</text>
 <text x="14.0" y="174.0" xml:space="preserve" fill="#cdd6f4">│▾ webapp               </text>
-<text x="224.0" y="174.0" xml:space="preserve" fill="#6c7086">local        </text>
-<text x="333.2" y="174.0" xml:space="preserve" fill="#a6e3a1">running </text>
-<text x="400.4" y="174.0" xml:space="preserve" fill="#cdd6f4">10s     </text>
-<text x="467.6" y="174.0" xml:space="preserve" fill="#f38ba8">    62k </text>
-<text x="534.8" y="174.0" xml:space="preserve" fill="#bac2de">4.0k/8.0k/2.0k/180.0k           </text>
+<text x="224.0" y="174.0" xml:space="preserve" fill="#6c7086">local       </text>
+<text x="324.8" y="174.0" xml:space="preserve" fill="#a6e3a1">running </text>
+<text x="392.0" y="174.0" xml:space="preserve" fill="#cdd6f4">10s    </text>
+<text x="450.8" y="174.0" xml:space="preserve" fill="#bac2de">1s     </text>
+<text x="509.6" y="174.0" xml:space="preserve" fill="#f38ba8">    62k </text>
+<text x="576.8" y="174.0" xml:space="preserve" fill="#bac2de">4.0k/8.0k/2.0k/180.0k      </text>
 <text x="803.6" y="174.0" xml:space="preserve" fill="#cdd6f4"> 34%  420M </text>
 <text x="896.0" y="174.0" xml:space="preserve" fill="#6c7086">[opus-4-8]</text>
 <text x="980.0" y="174.0" xml:space="preserve" fill="#cdd6f4">  │</text>
 <text x="14.0" y="192.0" xml:space="preserve" fill="#cdd6f4">│</text>
-<rect x="22.4" y="179.0" width="310.8" height="18" fill="#1e1e2e"/>
-<text x="22.4" y="192.0" xml:space="preserve" fill="#94e2d5">  ▾ search ~/.claude [Explore]       </text>
-<rect x="333.2" y="179.0" width="67.2" height="18" fill="#1e1e2e"/>
-<text x="333.2" y="192.0" xml:space="preserve" fill="#a6e3a1">running </text>
-<rect x="400.4" y="179.0" width="67.2" height="18" fill="#1e1e2e"/>
-<text x="400.4" y="192.0" xml:space="preserve" fill="#6c7086">9s      </text>
-<rect x="467.6" y="179.0" width="529.2" height="18" fill="#1e1e2e"/>
+<rect x="22.4" y="179.0" width="302.4" height="18" fill="#1e1e2e"/>
+<text x="22.4" y="192.0" xml:space="preserve" fill="#94e2d5">  ▾ search ~/.claude [Explore]      </text>
+<rect x="324.8" y="179.0" width="67.2" height="18" fill="#1e1e2e"/>
+<text x="324.8" y="192.0" xml:space="preserve" fill="#a6e3a1">running </text>
+<rect x="392.0" y="179.0" width="58.8" height="18" fill="#1e1e2e"/>
+<text x="392.0" y="192.0" xml:space="preserve" fill="#6c7086">9s     </text>
+<rect x="450.8" y="179.0" width="546.0" height="18" fill="#1e1e2e"/>
 <text x="996.8" y="192.0" xml:space="preserve" fill="#cdd6f4">│</text>
 <text x="14.0" y="210.0" xml:space="preserve" fill="#cdd6f4">│</text>
-<text x="22.4" y="210.0" xml:space="preserve" fill="#94e2d5">    └ sub-scan configs [general-pur… </text>
-<text x="333.2" y="210.0" xml:space="preserve" fill="#a6e3a1">running </text>
-<text x="400.4" y="210.0" xml:space="preserve" fill="#6c7086">9s      </text>
-<text x="467.6" y="210.0" xml:space="preserve" fill="#cdd6f4">                                                               │</text>
-<text x="14.0" y="228.0" xml:space="preserve" fill="#cdd6f4">│  ccwatch       </text>
-<text x="224.0" y="228.0" xml:space="preserve" fill="#6c7086">local        </text>
-<text x="333.2" y="228.0" xml:space="preserve" fill="#a6e3a1">running </text>
-<text x="400.4" y="228.0" xml:space="preserve" fill="#cdd6f4">10s     </text>
-<text x="467.6" y="228.0" xml:space="preserve" fill="#bac2de">     1k 4.0k/8.0k/2.0k/180.0k           </text>
+<text x="22.4" y="210.0" xml:space="preserve" fill="#94e2d5">    └ sub-scan configs [general-pu… </text>
+<text x="324.8" y="210.0" xml:space="preserve" fill="#a6e3a1">running </text>
+<text x="392.0" y="210.0" xml:space="preserve" fill="#6c7086">9s     </text>
+<text x="450.8" y="210.0" xml:space="preserve" fill="#cdd6f4">                                                                 │</text>
+<text x="14.0" y="228.0" xml:space="preserve" fill="#cdd6f4">│  remote-worker         </text>
+<text x="224.0" y="228.0" xml:space="preserve" fill="#89b4fa">demo-host   </text>
+<text x="324.8" y="228.0" xml:space="preserve" fill="#a6e3a1">running </text>
+<text x="392.0" y="228.0" xml:space="preserve" fill="#cdd6f4">10s    </text>
+<text x="450.8" y="228.0" xml:space="preserve" fill="#bac2de">1s          8k 4.0k/8.0k/2.0k/180.0k      </text>
 <text x="803.6" y="228.0" xml:space="preserve" fill="#cdd6f4"> 34%  420M </text>
 <text x="896.0" y="228.0" xml:space="preserve" fill="#6c7086">[opus-4-8]</text>
 <text x="980.0" y="228.0" xml:space="preserve" fill="#cdd6f4">  │</text>
-<text x="14.0" y="246.0" xml:space="preserve" fill="#cdd6f4">│  remote-worker         </text>
-<text x="224.0" y="246.0" xml:space="preserve" fill="#89b4fa">demo-host    </text>
-<text x="333.2" y="246.0" xml:space="preserve" fill="#a6e3a1">running </text>
-<text x="400.4" y="246.0" xml:space="preserve" fill="#cdd6f4">10s     </text>
-<text x="467.6" y="246.0" xml:space="preserve" fill="#bac2de">     8k 4.0k/8.0k/2.0k/180.0k           </text>
+<text x="14.0" y="246.0" xml:space="preserve" fill="#cdd6f4">│  ccwatch       </text>
+<text x="224.0" y="246.0" xml:space="preserve" fill="#6c7086">local       </text>
+<text x="324.8" y="246.0" xml:space="preserve" fill="#a6e3a1">running </text>
+<text x="392.0" y="246.0" xml:space="preserve" fill="#cdd6f4">10s    </text>
+<text x="450.8" y="246.0" xml:space="preserve" fill="#bac2de">1s          1k 4.0k/8.0k/2.0k/180.0k      </text>
 <text x="803.6" y="246.0" xml:space="preserve" fill="#cdd6f4"> 34%  420M </text>
 <text x="896.0" y="246.0" xml:space="preserve" fill="#6c7086">[opus-4-8]</text>
 <text x="980.0" y="246.0" xml:space="preserve" fill="#cdd6f4">  │</text>
@@ -98,6 +99,6 @@
 <text x="22.4" y="570.0" xml:space="preserve" fill="#6c7086">note: subagents can't be stopped individually — kill the owning session</text>
 <text x="618.8" y="570.0" xml:space="preserve" fill="#cdd6f4">                                             │</text>
 <text x="14.0" y="588.0" xml:space="preserve" fill="#cdd6f4">└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text>
-<rect x="14.0" y="593.0" width="898.8" height="18" fill="#bac2de"/>
-<text x="14.0" y="606.0" xml:space="preserve" fill="#11111b"> / jump · ↑↓ · enter expand · d details · x hide-done · f hide-idle · k kill · p pause · r resume · q quit </text>
+<rect x="14.0" y="593.0" width="974.4" height="18" fill="#bac2de"/>
+<text x="14.0" y="606.0" xml:space="preserve" fill="#11111b"> / jump · ↑↓ · enter expand · d details · s sort · x hide-done · f hide-idle · k kill · p pause · r resume · q quit </text>
 </svg>
