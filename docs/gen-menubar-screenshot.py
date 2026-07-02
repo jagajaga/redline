@@ -55,7 +55,7 @@ rows = [
     ("hdr",  "throttle ▲1.3× · range 3h39m · tank ~57% · reset 06:10"),
     ("alert","⚠ runaway loop — webapp: 62k tok/min · no user turn 7m"),
     ("sess", "webapp  —  24k tok/min", True),
-    ("sess", "ccwatch  —  16k tok/min", False),
+    ("sess", "api-server  —  16k tok/min", False),
     ("sess", "remote-worker  —  8k tok/min  ·  demo-host", False),
     ("item", "Settings                                              ›"),
     ("item", "Open TUI dashboard"),

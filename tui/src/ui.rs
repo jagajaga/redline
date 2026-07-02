@@ -973,8 +973,10 @@ mod tests {
                     ));
                 }
                 if !run.trim().is_empty() {
+                    // textLength pins the run to the cell grid — otherwise the
+                    // font's natural advance drifts and frame borders misalign.
                     s.push_str(&format!(
-                        "<text x=\"{px:.1}\" y=\"{py:.1}\" xml:space=\"preserve\" fill=\"{text_fg}\">{}</text>\n",
+                        "<text x=\"{px:.1}\" y=\"{py:.1}\" xml:space=\"preserve\" textLength=\"{rw:.1}\" lengthAdjust=\"spacingAndGlyphs\" fill=\"{text_fg}\">{}</text>\n",
                         xml_escape(&run)
                     ));
                 }
@@ -993,22 +995,22 @@ mod tests {
 
         // A busy, representative scene: a hot local session with nested agents,
         // a quiet local one, and a remote host — plus alerts.
-        let mut webapp = session(
+        let mut hot = session(
             "s1",
             "webapp",
             vec![{
-                let mut e = agent("a1", "search ~/.claude", vec![agent("a2", "sub-scan configs", vec![])]);
+                let mut e = agent("a1", "scan repository", vec![agent("a2", "sub-scan configs", vec![])]);
                 e.subagent_type = "Explore".into();
                 e
             }],
         );
-        webapp.tasks = vec![
+        hot.tasks = vec![
             Task { subject: "bump dependencies".into(), status: "in_progress".into(), blocked: false, active_form: None },
-            Task { subject: "audit deploy".into(), status: "pending".into(), blocked: true, active_form: None },
+            Task { subject: "add integration tests".into(), status: "pending".into(), blocked: true, active_form: None },
             Task { subject: "update changelog".into(), status: "completed".into(), blocked: false, active_form: None },
         ];
 
-        let mut quiet = session("s2", "ccwatch", vec![]);
+        let mut quiet = session("s2", "api-server", vec![]);
         quiet.tokens_per_min = 1_000.0;
 
         let mut remote = session("s3", "remote-worker", vec![]);
@@ -1016,7 +1018,7 @@ mod tests {
         remote.remote_name = Some("demo-host".into());
         remote.tokens_per_min = 8_000.0;
 
-        let mut snap = snapshot(vec![webapp, quiet, remote]);
+        let mut snap = snapshot(vec![hot, quiet, remote]);
         // Governor segment in the top bar.
         let tank = ccwatch_core::model::Tank {
             used: 10_100_000,
