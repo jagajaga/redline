@@ -7,9 +7,11 @@ being burned or leaking**.
 
 It reads local Claude Code state under `~/.claude` (session registry, task
 lists, and transcripts), accounts for token usage incrementally, samples live
-process CPU/RSS, and flags leaks (runaway loops, cache bleed, zombie sessions,
-agent storms). You can act on what you find — pause, resume, or kill a session,
-kill a background process, or disable a hook — all with confirmation.
+process CPU/RSS, **monitors the child processes each session spawns** (builds,
+dev servers, test runs), and flags leaks (runaway loops, cache bleed, zombie
+sessions, agent storms). A **Governor** fuel gauge tracks your plan-window and
+hourly budgets. You can act on what you find — pause, resume, or kill a
+session, cancel a remote one, or disable a hook — all with confirmation.
 
 ## Screenshots
 
@@ -19,13 +21,15 @@ kill a background process, or disable a hook — all with confirmation.
 
 ### macOS menu bar (`ccwatch-menubar`)
 
-A live load graph rendered right in the menu bar — Retina-crisp 2× bars, colored
-green→amber→red by **absolute burn vs. your configured threshold** (so a steady
-moderate load stays green; red means you're actually burning). The dropdown has
-alerts on top and a submenu per session with live details and **Pause / Resume /
-Kill** actions (destructive ones confirmed via a native dialog, results as
-notifications). Remote sessions get a `Cancel on <host>` action instead. It
-auto-reconnects if the daemon restarts.
+A live load graph rendered right in the menu bar — Retina-crisp 2× bars in a
+rounded translucent well, colored teal→amber→red by **absolute burn vs. your
+threshold**. Next to it: the readout of your choice (**Settings ▸ Show in menu
+bar**: throttle `▲2.1×`, burn rate, range, tank %, or graph only) with alerts
+appended. The dropdown has the governor line and alerts on top, then a submenu
+per session: burn sparkline, token breakdown, child processes, and
+**Pause / Resume / Kill** (native confirmation; remote sessions get
+`Cancel on <host>`). Settings also hides idle sessions. Auto-reconnects if the
+daemon restarts; preferences persist in `~/.claude/ccwatch/menubar.json`.
 
 ![ccwatch menu bar](docs/screenshot-menubar.svg)
 
@@ -44,12 +48,18 @@ crate, not a rewrite:
 | `core` | — | Data model, collectors, incremental token accounting, leak heuristics, IPC types, action executors. Pure logic, heavily unit-tested. |
 | `daemon` | `ccwatchd` | Always-on collector. Owns the single engine, refreshes on file-change events (FSEvents) with a poll backstop, serves newline-delimited JSON over a Unix socket at `~/.claude/ccwatch/daemon.sock`. |
 | `tui` | `ccwatch` | ratatui terminal client. Auto-spawns the daemon if absent, subscribes for pushed snapshots, renders, and drives actions. |
+| `menubar` | `ccwatch-menubar` | macOS menu-bar client (tray-icon): live load graph, per-session submenus with sparklines and actions, Settings. Same daemon, same IPC. |
 
-## Build & run
+## Install
+
+Grab the latest [release](https://github.com/jagajaga/ccwatch/releases)
+(universal macOS binaries: `ccwatch`, `ccwatchd`, `ccwatch-menubar`), or build
+from source:
 
 ```sh
 cargo build --release
 ./target/release/ccwatch          # launches the TUI (auto-spawns the daemon)
+./target/release/ccwatch-menubar  # the menu-bar app
 ```
 
 `ccwatchd --once` prints a single JSON snapshot and exits — handy for scripting:
@@ -64,11 +74,18 @@ cargo build --release
 /        fuzzy jump to any session / agent / task / watcher by name
 ↑ ↓      move selection
 enter    expand / collapse the selected session or agent
+d        details popup for the selected session / agent
+s        cycle sort: tok/min → last active → name → cpu → rss
+x        hide/show finished agents
+f        hide/show idle sessions (keeps anything still burning)
 k        kill selected session   (SIGTERM → grace → SIGKILL, with confirm)
 p / r    pause / resume session   (SIGSTOP / SIGCONT)
-f        hide/show idle sessions
 q        quit
 ```
+
+The grid shows per session: host, state, uptime, **last activity**, tok/min,
+in/out/cache-write/cache-read, cpu, rss, model. The bottom panes show the
+selected session's tasks, **live child processes** (cpu-colored), and watchers.
 
 Killing a background command targets just that pid; a `/loop` or subagent lives
 inside a session process and can only be stopped by killing the owning session.

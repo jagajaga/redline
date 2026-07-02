@@ -1,0 +1,44 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test --workspace
+      - name: Build (arm64 + x86_64)
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+      - name: Universal binaries
+        run: |
+          mkdir -p dist/ccwatch
+          for bin in ccwatch ccwatchd ccwatch-menubar; do
+            lipo -create -output "dist/ccwatch/$bin" \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin"
+            lipo -info "dist/ccwatch/$bin"
+          done
+          cp README.md dist/ccwatch/
+          tar -C dist -czf "ccwatch-${GITHUB_REF_NAME}-macos-universal.tar.gz" ccwatch
+          shasum -a 256 ccwatch-*.tar.gz > checksums.txt
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            ccwatch-*.tar.gz checksums.txt \
+            --title "ccwatch $GITHUB_REF_NAME" \
+            --generate-notes

@@ -976,6 +976,23 @@ mod tests {
         remote.tokens_per_min = 8_000.0;
 
         let mut snap = snapshot(vec![webapp, quiet, remote]);
+        // Governor segment in the top bar.
+        let tank = ccwatch_core::model::Tank {
+            used: 10_100_000,
+            budget: Some(23_700_000),
+            budget_source: ccwatch_core::model::BudgetSource::Learned,
+            window_start: 0,
+            resets_at: Some(12_000_000),
+            rate_per_min: 62_000.0,
+            cruise_per_min: Some(48_000.0),
+            delta: Some(1.3),
+            range_min: Some(219.0),
+            wall_at: Some(9_000_000),
+        };
+        snap.governor = Some(ccwatch_core::model::GovernorStatus {
+            window: tank,
+            cruise: tank,
+        });
         snap.alerts = vec![
             Alert { severity: Severity::Critical, kind: AlertKind::RunawayLoop, subject: "webapp".into(), session_id: "s1".into(), message: "62k tok/min · no user turn 7m · agent×2".into(), since_ms: 0 },
             Alert { severity: Severity::Warn, kind: AlertKind::AgentStorm, subject: "webapp".into(), session_id: "s1".into(), message: "2 agents spawned in 40s".into(), since_ms: 0 },
