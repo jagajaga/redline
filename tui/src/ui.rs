@@ -145,16 +145,48 @@ fn alert_line(a: &Alert) -> Line<'static> {
     ])
 }
 
-/// Fixed column widths for the session/agent grid — every row pads to these,
-/// so columns stay aligned no matter how long a name, host, or token figure is.
-const W_NAME: usize = 24; // includes the 2-char expand marker
-const W_HOST: usize = 13;
-const W_STATE: usize = 8;
-const W_UP: usize = 8;
-const W_TPM: usize = 8;
-const W_BREAKDOWN: usize = 27;
-const W_CPU: usize = 5;
-const W_RSS: usize = 6;
+/// Column widths for the session/agent grid. Base values fit a ~110-col
+/// terminal; anything wider is distributed to the data-dense columns
+/// (breakdown, tok/min, then name/host).
+#[derive(Clone, Copy)]
+struct Widths {
+    name: usize, // includes the 2-char expand marker
+    host: usize,
+    state: usize,
+    up: usize,
+    tpm: usize,
+    breakdown: usize,
+    cpu: usize,
+    rss: usize,
+}
+
+impl Widths {
+    fn for_width(inner_width: usize) -> Self {
+        let mut w = Widths {
+            name: 24,
+            host: 13,
+            state: 8,
+            up: 8,
+            tpm: 8,
+            breakdown: 27,
+            cpu: 5,
+            rss: 6,
+        };
+        const MODEL_RESERVE: usize = 12;
+        let base = w.name + w.host + w.state + w.up + w.tpm + w.breakdown + w.cpu + w.rss;
+        let mut extra = inner_width.saturating_sub(base + MODEL_RESERVE);
+        let mut grow = |slot: &mut usize, by: usize| {
+            let g = by.min(extra);
+            *slot += g;
+            extra -= g;
+        };
+        grow(&mut w.breakdown, 12);
+        grow(&mut w.tpm, 4);
+        grow(&mut w.name, 14);
+        grow(&mut w.host, 8);
+        w
+    }
+}
 
 /// Truncate-and-pad to an exact width (left-aligned).
 fn cell(s: &str, w: usize) -> String {
@@ -166,42 +198,63 @@ fn cell_r(s: &str, w: usize) -> String {
     format!("{:>w$} ", truncate(s, w.saturating_sub(1)), w = w.saturating_sub(1))
 }
 
+/// Row-selection highlight: a background tint that keeps each cell's own
+/// color readable (REVERSED turned colored cells into a patchwork).
+fn selection_style() -> Style {
+    Style::default().bg(Color::Rgb(36, 52, 84))
+}
+
+fn header_line(w: &Widths) -> Line<'static> {
+    let text = format!(
+        "{}{}{}{}{}{}{}{}model",
+        cell("  name/desc", w.name),
+        cell("host", w.host),
+        cell("state", w.state),
+        cell("up", w.up),
+        cell_r("tok/min", w.tpm),
+        cell("in/out/cw/cr", w.breakdown),
+        cell_r("cpu", w.cpu),
+        cell_r("rss", w.rss),
+    );
+    Line::from(Span::styled(
+        text,
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+    ))
+}
+
 fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     let rows = app.visible_rows();
-    let header = format!(
-        "{}{}{}{}{}{}{}{}model",
-        cell("  name/desc", W_NAME),
-        cell("host", W_HOST),
-        cell("state", W_STATE),
-        cell("up", W_UP),
-        cell_r("tok/min", W_TPM),
-        cell("in/out/cw/cr", W_BREAKDOWN),
-        cell_r("cpu", W_CPU),
-        cell_r("rss", W_RSS),
-    );
-    let block = Block::default().borders(Borders::ALL).title(Line::from(vec![
-        Span::raw(" SESSIONS / AGENTS "),
-        Span::styled(header, Style::default().fg(Color::DarkGray)),
-    ]));
-    let inner_h = area.height.saturating_sub(2) as usize;
-    let start = if app.selected >= inner_h {
-        app.selected - inner_h + 1
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" SESSIONS / AGENTS ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let w = Widths::for_width(inner.width as usize);
+    let chunks =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    // Header row rendered by the same cell code as the data → exact alignment.
+    f.render_widget(Paragraph::new(header_line(&w)), chunks[0]);
+
+    let list_h = chunks[1].height as usize;
+    let start = if app.selected >= list_h {
+        app.selected - list_h + 1
     } else {
         0
     };
 
     let mut items = Vec::new();
-    for (i, vr) in rows.iter().enumerate().skip(start).take(inner_h) {
+    for (i, vr) in rows.iter().enumerate().skip(start).take(list_h) {
         let selected = i == app.selected;
         let line = match &vr.row {
-            RowRef::Session(si) => session_line(&app.snapshot.sessions[*si], app),
+            RowRef::Session(si) => session_line(&app.snapshot.sessions[*si], app, &w),
             RowRef::Agent(si, path) => {
                 let a = agent_at(&app.snapshot.sessions[*si].agents, path);
-                agent_line(a, vr.depth, app)
+                agent_line(a, vr.depth, app, &w)
             }
         };
         let item = if selected {
-            ListItem::new(line).style(Style::default().add_modifier(Modifier::REVERSED))
+            ListItem::new(line).style(selection_style())
         } else {
             ListItem::new(line)
         };
@@ -213,19 +266,19 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::DarkGray),
         )));
     }
-    f.render_widget(List::new(items).block(block), area);
+    f.render_widget(List::new(items), chunks[1]);
 }
 
-fn state_span(state: SessionState) -> Span<'static> {
+fn state_span(state: SessionState, w: &Widths) -> Span<'static> {
     let (txt, color) = match state {
         SessionState::Running => ("running", Color::Green),
-        SessionState::Idle => ("idle", Color::DarkGray),
-        SessionState::Ended => ("ended", Color::DarkGray),
+        SessionState::Idle => ("idle", Color::Gray),
+        SessionState::Ended => ("ended", Color::Gray),
     };
-    Span::styled(cell(txt, W_STATE), Style::default().fg(color))
+    Span::styled(cell(txt, w.state), Style::default().fg(color))
 }
 
-fn burn_span(tpm: f64, threshold: f64) -> Span<'static> {
+fn burn_span(tpm: f64, threshold: f64, w: &Widths) -> Span<'static> {
     let color = if tpm >= threshold {
         Color::Red
     } else if tpm >= threshold / 2.0 {
@@ -233,24 +286,24 @@ fn burn_span(tpm: f64, threshold: f64) -> Span<'static> {
     } else {
         Color::Gray
     };
-    Span::styled(cell_r(&format::rate(tpm), W_TPM), Style::default().fg(color))
+    Span::styled(cell_r(&format::rate(tpm), w.tpm), Style::default().fg(color))
 }
 
-fn host_cell(host: &Host) -> Span<'static> {
+fn host_cell(host: &Host, w: &Widths) -> Span<'static> {
     match host {
-        Host::Local => Span::styled(cell("local", W_HOST), Style::default().fg(Color::DarkGray)),
+        Host::Local => Span::styled(cell("local", w.host), Style::default().fg(Color::DarkGray)),
         Host::Remote { name, .. } => Span::styled(
-            cell(name, W_HOST),
+            cell(name, w.host),
             Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
         ),
         Host::Cloud => Span::styled(
-            cell("cloud", W_HOST),
+            cell("cloud", w.host),
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         ),
     }
 }
 
-fn session_line(s: &Session, app: &App) -> Line<'static> {
+fn session_line(s: &Session, app: &App, w: &Widths) -> Line<'static> {
     let up = s
         .started_at
         .map(|t| format::ago(t, app.now_ms))
@@ -278,21 +331,26 @@ fn session_line(s: &Session, app: &App) -> Line<'static> {
     };
     Line::from(vec![
         Span::styled(
-            cell(&format!("{expand}{}", s.name), W_NAME),
+            cell(&format!("{expand}{}", s.name), w.name),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        host_cell(&s.host),
-        state_span(s.state),
-        Span::raw(cell(&up, W_UP)),
-        burn_span(s.tokens_per_min, BURN_RED),
-        Span::styled(cell(&breakdown, W_BREAKDOWN), Style::default().fg(Color::DarkGray)),
-        Span::raw(cell_r(&format!("{:.0}%", s.cpu_pct), W_CPU)),
-        Span::raw(cell_r(&format!("{}M", s.rss_mb), W_RSS)),
+        host_cell(&s.host, w),
+        state_span(s.state, w),
+        Span::raw(cell(&up, w.up)),
+        burn_span(s.tokens_per_min, BURN_RED, w),
+        Span::styled(cell(&breakdown, w.breakdown), Style::default().fg(Color::Gray)),
+        Span::raw(cell_r(&format!("{:.0}%", s.cpu_pct), w.cpu)),
+        Span::raw(cell_r(&format!("{}M", s.rss_mb), w.rss)),
         Span::styled(format!("[{model}]"), Style::default().fg(Color::DarkGray)),
     ])
 }
 
-fn agent_line(a: Option<&ccwatch_core::model::Agent>, depth: usize, app: &App) -> Line<'static> {
+fn agent_line(
+    a: Option<&ccwatch_core::model::Agent>,
+    depth: usize,
+    app: &App,
+    w: &Widths,
+) -> Line<'static> {
     let Some(a) = a else {
         return Line::from("· <agent>");
     };
@@ -314,12 +372,12 @@ fn agent_line(a: Option<&ccwatch_core::model::Agent>, depth: usize, app: &App) -
         .unwrap_or_else(|| "-".into());
     // The name area spans the NAME + HOST columns, so agent rows keep the
     // state/up columns aligned with session rows.
-    let name_area = W_NAME + W_HOST;
+    let name_area = w.name + w.host;
     let label = format!("{indent}{branch}{} [{}]", a.description, a.subagent_type);
     Line::from(vec![
         Span::styled(cell(&label, name_area), Style::default().fg(Color::Cyan)),
-        Span::styled(cell(st, W_STATE), Style::default().fg(color)),
-        Span::styled(cell(&up, W_UP), Style::default().fg(Color::DarkGray)),
+        Span::styled(cell(st, w.state), Style::default().fg(color)),
+        Span::styled(cell(&up, w.up), Style::default().fg(Color::DarkGray)),
     ])
 }
 

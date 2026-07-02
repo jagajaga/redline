@@ -166,8 +166,14 @@ impl App {
                     .map(|a| !a.children.is_empty())
                     .unwrap_or(false),
             };
-            if has_children && !self.expanded.remove(&vr.key) {
-                self.expanded.insert(vr.key);
+            if has_children {
+                if !self.expanded.remove(&vr.key) {
+                    self.expanded.insert(vr.key);
+                }
+                self.status = None;
+            } else {
+                // Enter must never look dead: explain why nothing expanded.
+                self.status = Some("no subagents recorded for this row".into());
             }
         }
     }
