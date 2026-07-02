@@ -1,6 +1,6 @@
-<h1 align="center">ccwatch</h1>
+<p align="center"><img src="assets/icon.svg" width="140" alt="ccwatch"></p>
 
-<p align="center"><code>▂▃▄▅▆▇█</code> <b>▲2.1×</b></p>
+<h1 align="center">ccwatch</h1>
 
 <p align="center">
 Mission control for Claude Code.<br/>

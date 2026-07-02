@@ -36,7 +36,8 @@ jobs:
       - name: App bundle (menu bar)
         run: |
           APP="dist/ccwatch-menubar.app"
-          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp assets/ccwatch.icns "$APP/Contents/Resources/"
           # ccwatchd and ccwatch ride along: the app spawns the daemon and
           # "Open TUI dashboard" from beside its own executable.
           cp dist/ccwatch/ccwatch-menubar dist/ccwatch/ccwatchd dist/ccwatch/ccwatch "$APP/Contents/MacOS/"
@@ -51,6 +52,7 @@ jobs:
               <key>CFBundleVersion</key><string>${GITHUB_REF_NAME#v}</string>
               <key>CFBundleShortVersionString</key><string>${GITHUB_REF_NAME#v}</string>
               <key>CFBundleExecutable</key><string>ccwatch-menubar</string>
+              <key>CFBundleIconFile</key><string>ccwatch</string>
               <key>CFBundlePackageType</key><string>APPL</string>
               <key>LSMinimumSystemVersion</key><string>11.0</string>
               <key>LSUIElement</key><true/>

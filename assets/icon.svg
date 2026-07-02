@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <clipPath id="squircle"><rect x="32" y="32" width="960" height="960" rx="200"/></clipPath>
+  </defs>
+  <g clip-path="url(#squircle)">
+    <rect x="32" y="32" width="960" height="960" fill="#EDE5D2"/>
+
+    <!-- faint big arc, lower left -->
+    <circle cx="120" cy="1000" r="430" fill="none" stroke="#C9BFA6" stroke-width="16"/>
+
+    <!-- crossing beams -->
+    <line x1="60" y1="930" x2="960" y2="100" stroke="#141414" stroke-width="30"/>
+    <line x1="120" y1="960" x2="990" y2="160" stroke="#141414" stroke-width="9"/>
+    <line x1="110" y1="120" x2="920" y2="900" stroke="#D9452B" stroke-width="13"/>
+
+    <!-- concentric circles (the gauge) -->
+    <circle cx="400" cy="380" r="262" fill="#141414"/>
+    <circle cx="400" cy="380" r="248" fill="#EDE5D2"/>
+    <circle cx="404" cy="384" r="208" fill="#2E8FA3"/>
+    <circle cx="412" cy="390" r="150" fill="#EFC42B"/>
+    <circle cx="420" cy="396" r="96"  fill="#D9452B"/>
+    <circle cx="426" cy="402" r="40"  fill="#141414"/>
+
+    <!-- rising bars, slightly tilted -->
+    <g transform="rotate(-8 720 760)">
+      <line x1="520" y1="812" x2="952" y2="812" stroke="#141414" stroke-width="12"/>
+      <rect x="540" y="742" width="56" height="70"  fill="#2E8FA3" stroke="#141414" stroke-width="7"/>
+      <rect x="620" y="700" width="56" height="112" fill="#2E8FA3" stroke="#141414" stroke-width="7"/>
+      <rect x="700" y="642" width="56" height="170" fill="#EFC42B" stroke="#141414" stroke-width="7"/>
+      <rect x="780" y="570" width="56" height="242" fill="#E88C1F" stroke="#141414" stroke-width="7"/>
+      <rect x="860" y="484" width="56" height="328" fill="#D9452B" stroke="#141414" stroke-width="7"/>
+    </g>
+
+    <!-- gauge arc + needle, top right -->
+    <path d="M 640 260 A 150 150 0 0 1 940 260" fill="none" stroke="#141414" stroke-width="14"/>
+    <line x1="790" y1="260" x2="880" y2="140" stroke="#D9452B" stroke-width="14"/>
+    <circle cx="790" cy="260" r="20" fill="#141414"/>
+
+    <!-- accents -->
+    <circle cx="905" cy="392" r="40" fill="#EFC42B" stroke="#141414" stroke-width="8"/>
+    <circle cx="152" cy="590" r="24" fill="#141414"/>
+    <circle cx="212" cy="530" r="14" fill="#D9452B"/>
+    <g transform="rotate(14 165 165)" stroke="#141414" stroke-width="6">
+      <rect x="120" y="120" width="30" height="30" fill="#141414"/>
+      <rect x="150" y="120" width="30" height="30" fill="#EDE5D2"/>
+      <rect x="120" y="150" width="30" height="30" fill="#EDE5D2"/>
+      <rect x="150" y="150" width="30" height="30" fill="#2E8FA3"/>
+    </g>
+  </g>
+</svg>
