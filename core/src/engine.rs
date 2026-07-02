@@ -24,7 +24,11 @@ struct TokenEvent {
     total: u64,
     input: u64,
     cache_read: u64,
-    opus: bool,
+    /// The model tier of *this* message (not the session's latest), so the
+    /// governor weights each message by what actually produced it.
+    tier: &'static str,
+    /// Opus-equivalent weight for `tier` at ingest time.
+    weight: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -512,17 +516,24 @@ impl Engine {
         for accum in self.accums.values_mut() {
             accum.prune(now_ms, self.config.retention_secs());
         }
+        // usage_buckets carry Opus-equivalent (weighted) tokens so the governor
+        // tanks stay mix-invariant across a shifting model mix. model_mix is the
+        // raw per-tier breakdown for display.
         let mut bucket_map: std::collections::BTreeMap<i64, u64> = Default::default();
-        let mut opus_map: std::collections::BTreeMap<i64, u64> = Default::default();
+        let mut mix_map: std::collections::BTreeMap<&'static str, u64> = Default::default();
         for accum in self.accums.values() {
             for e in &accum.events {
                 let b = crate::governor::bucket_of(e.ts_ms);
-                *bucket_map.entry(b).or_insert(0) += e.total;
-                if e.opus {
-                    *opus_map.entry(b).or_insert(0) += e.total;
-                }
+                let weighted = (e.total as f64 * e.weight).round() as u64;
+                *bucket_map.entry(b).or_insert(0) += weighted;
+                *mix_map.entry(e.tier).or_insert(0) += e.total;
             }
         }
+        let model_mix: Vec<(String, u64)> = mix_map
+            .into_iter()
+            .filter(|(_, v)| *v > 0)
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
 
         Snapshot {
             generated_at: now_ms,
@@ -531,8 +542,8 @@ impl Engine {
             totals,
             usage_buckets: bucket_map.into_iter().collect(),
             rate_limits: self.rate_limit_ts(),
-            opus_buckets: opus_map.into_iter().collect(),
             limit_hits: self.limit_hits.clone(),
+            model_mix,
             governor: None,
         }
     }
@@ -637,6 +648,10 @@ impl Engine {
                         }
                         if let Some(ts) = ts_ms {
                             accum.last_activity = Some(ts.max(accum.last_activity.unwrap_or(0)));
+                            // Tier from THIS message's model (accum.model was
+                            // just set from it; falls back to the last-known
+                            // model only when this message omits one).
+                            let tier = crate::config::tier_of(accum.model.as_deref());
                             accum.events.push_back(TokenEvent {
                                 ts_ms: ts,
                                 // Burn rate tracks billable tokens, not cheap
@@ -645,11 +660,8 @@ impl Engine {
                                 total: usage.billable(),
                                 input: usage.input,
                                 cache_read: usage.cache_read,
-                                opus: accum
-                                    .model
-                                    .as_deref()
-                                    .map(|m| m.contains("opus"))
-                                    .unwrap_or(false),
+                                tier,
+                                weight: self.config.weight_for(tier),
                             });
                         }
                     }
@@ -819,16 +831,14 @@ impl Engine {
                             if let Some(ts) = ts_ms {
                                 data.last_activity =
                                     Some(ts.max(data.last_activity.unwrap_or(0)));
+                                let tier = crate::config::tier_of(data.model.as_deref());
                                 let te = TokenEvent {
                                     ts_ms: ts,
                                     total: usage.billable(),
                                     input: usage.input,
                                     cache_read: usage.cache_read,
-                                    opus: data
-                                        .model
-                                        .as_deref()
-                                        .map(|m| m.contains("opus"))
-                                        .unwrap_or(false),
+                                    tier,
+                                    weight: self.config.weight_for(tier),
                                 };
                                 data.events.push_back(te);
                                 // Roll up into the parent session: subagent

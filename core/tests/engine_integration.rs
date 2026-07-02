@@ -101,6 +101,63 @@ fn refresh_builds_session_with_tokens_tasks_and_runaway_alert() {
 }
 
 #[test]
+fn governor_buckets_weight_each_message_by_its_own_model() {
+    // A session that uses Fable first, then switches to Opus. Per-message
+    // tagging must weight the Fable message ×2 even though the session's LATEST
+    // model is Opus — the whole point of the fix. Session-latest tagging would
+    // (wrongly) weight both messages ×1.
+    let now: i64 = 1_800_000_000_000;
+    let root = std::env::temp_dir().join(format!("ccw-engine-mix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let pid = std::process::id() as i32;
+    let sid = "sess-mix";
+
+    std::fs::create_dir_all(root.join("sessions")).unwrap();
+    std::fs::write(
+        root.join("sessions").join(format!("{pid}.json")),
+        format!(
+            r#"{{"pid":{pid},"sessionId":"{sid}","cwd":"/tmp/mix","startedAt":{},"name":"mixer"}}"#,
+            now - 600_000
+        ),
+    )
+    .unwrap();
+    let proj = root.join("projects").join("-tmp-mix");
+    std::fs::create_dir_all(&proj).unwrap();
+    let mut lines = String::new();
+    // Fable message (billable 5000), then Opus message (billable 2000). Both
+    // in-window.
+    lines.push_str(&format!(
+        r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-fable-5","usage":{{"input_tokens":1000,"output_tokens":4000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#,
+        rfc3339(now - 60_000)
+    ));
+    lines.push('\n');
+    lines.push_str(&format!(
+        r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-opus-4-8","usage":{{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#,
+        rfc3339(now - 30_000)
+    ));
+    lines.push('\n');
+    std::fs::write(proj.join(format!("{sid}.jsonl")), lines).unwrap();
+
+    let mut engine = Engine::new(Paths::new(&root), Config::default());
+    let snap = engine.refresh(now);
+
+    // Latest model is Opus (display), but the mix carries both raw.
+    assert_eq!(snap.sessions[0].model.as_deref(), Some("claude-opus-4-8"));
+    let mix: std::collections::HashMap<_, _> = snap.model_mix.iter().cloned().collect();
+    assert_eq!(mix.get("fable"), Some(&5_000), "raw Fable billable");
+    assert_eq!(mix.get("opus"), Some(&2_000), "raw Opus billable");
+
+    // usage_buckets are Opus-equivalent: 5000×2.0 (Fable) + 2000×1.0 (Opus).
+    let weighted: u64 = snap.usage_buckets.iter().map(|(_, v)| v).sum();
+    assert_eq!(
+        weighted, 10_000 + 2_000,
+        "Fable message must be weighted ×2 despite Opus being the latest model"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn pending_tool_with_stale_generation_is_waiting_not_idle() {
     let now: i64 = 1_800_000_000_000;
     let root = std::env::temp_dir().join(format!("ccw-engine-wait-{}", std::process::id()));

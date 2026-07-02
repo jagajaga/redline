@@ -233,24 +233,24 @@ pub struct Tank {
     pub wall_at: Option<i64>,
 }
 
-/// The Governor: fuel-gauge readouts for the plan window and cruise budget.
+/// The Governor: fuel-gauge readouts for the two real Anthropic caps — the 5h
+/// plan window and the weekly limit.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct GovernorStatus {
     pub window: Tank,
-    pub cruise: Tank,
-    /// Weekly all-models tank (7-day window). `None` until there's data.
+    /// Weekly tank (7-day window). A single account-wide limit that every model
+    /// drains together; usage is metered in Opus-equivalent (weighted) tokens.
+    /// `None` until there's data.
     #[serde(default)]
     pub week: Option<Tank>,
-    /// Weekly Opus-only tank (Max plans meter Opus separately).
-    #[serde(default)]
-    pub week_opus: Option<Tank>,
 }
 
 impl GovernorStatus {
-    /// The single number for the menu bar: the plan-window delta when a budget
-    /// is known, else the cruise delta.
+    /// The single number for the menu bar: the plan-window throttle (rate vs
+    /// the pace that lands exactly at the window reset). `None` when no window
+    /// budget is known yet.
     pub fn primary_delta(&self) -> Option<f64> {
-        self.window.delta.or(self.cruise.delta)
+        self.window.delta
     }
 }
 
@@ -362,14 +362,16 @@ pub struct Snapshot {
     /// they hard-anchor window boundaries and calibrate the budget.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rate_limits: Vec<i64>,
-    /// Opus-only billable usage buckets (subset of `usage_buckets`) — the
-    /// weekly Opus cap is metered separately on Max plans.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub opus_buckets: Vec<(i64, u64)>,
     /// Parsed "you've hit your … limit · resets …" markers — authoritative
     /// wall + reset events for the session and weekly clocks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limit_hits: Vec<LimitHit>,
+    /// Raw billable tokens per model tier ("opus", "sonnet", "haiku", "fable",
+    /// "other") over the recent horizon — the account's model mix. Raw, not
+    /// weighted, so it reads as the physical spend; the governor tanks apply the
+    /// weights. Merged (summed per tier) across every host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_mix: Vec<(String, u64)>,
     /// Fuel-gauge readouts; computed by the daemon after merging all hosts.
     #[serde(default)]
     pub governor: Option<GovernorStatus>,
@@ -396,8 +398,8 @@ impl Snapshot {
             totals: Totals::default(),
             usage_buckets: Vec::new(),
             rate_limits: Vec::new(),
-            opus_buckets: Vec::new(),
             limit_hits: Vec::new(),
+            model_mix: Vec::new(),
             governor: None,
         }
     }

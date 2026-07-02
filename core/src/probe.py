@@ -26,13 +26,48 @@ MAX_TAIL = 16 * 1024 * 1024  # cap transcript read for huge histories
 BUCKET_MS = 5 * 60 * 1000    # governor usage buckets
 HORIZON_MS = 9 * 24 * 3600 * 1000  # ~9 days: covers the weekly window
 
-# bucket_ts -> billable tokens, fed by every transcript scan
+# bucket_ts -> Opus-equivalent (weighted) billable tokens, fed by every scan.
+# Kept mix-invariant so the governor's learned ceiling survives Fable↔Opus
+# swaps. Weights match ccwatch-core's config defaults (Opus-normalised price
+# ratios); a local config override is NOT applied here — remote buckets always
+# use the defaults.
 USAGE_BUCKETS = {}
 # observed 429 timestamps (epoch ms) within the horizon
 RATE_LIMITS = []
-# opus-only billable buckets, and parsed limit-hit markers
-OPUS_BUCKETS = {}
+# parsed limit-hit markers
 LIMIT_HITS = []
+# raw billable tokens per model tier over the horizon — the account's mix
+MODEL_MIX = {}
+
+WEIGHTS = {"opus": 1.0, "sonnet": 0.6, "haiku": 0.2, "fable": 2.0, "other": 1.0}
+
+
+def tier_of(model):
+    """Weight/cost tier for a model id (substring match), else 'other'."""
+    if not model:
+        return "other"
+    m = model.lower()
+    if "opus" in m:
+        return "opus"
+    if "sonnet" in m:
+        return "sonnet"
+    if "haiku" in m:
+        return "haiku"
+    if "fable" in m or "mythos" in m:
+        return "fable"
+    return "other"
+
+
+def account_buckets(ts, billable, model):
+    """Fold one message into the account-wide governor buckets + mix."""
+    if ts < NOW_MS - HORIZON_MS:
+        return
+    bucket = ts - (ts % BUCKET_MS)
+    tier = tier_of(model)
+    USAGE_BUCKETS[bucket] = USAGE_BUCKETS.get(bucket, 0) + int(
+        round(billable * WEIGHTS.get(tier, 1.0))
+    )
+    MODEL_MIX[tier] = MODEL_MIX.get(tier, 0) + billable
 
 
 def parse_reset(text, hit_ms):
@@ -299,9 +334,7 @@ def scan_transcript(path):
                 )
                 if ts >= NOW_MS - WINDOW_MS:
                     window_billable += billable
-                if ts >= NOW_MS - HORIZON_MS:
-                    bucket = ts - (ts % BUCKET_MS)
-                    USAGE_BUCKETS[bucket] = USAGE_BUCKETS.get(bucket, 0) + billable
+                account_buckets(ts, billable, model)
         fh.close()
     except Exception:
         pass
@@ -371,9 +404,7 @@ def scan_sidechain(path):
                             + g("cache_creation_input_tokens"))
                 if ts >= NOW_MS - WINDOW_MS:
                     window_billable += billable
-                if ts >= NOW_MS - HORIZON_MS:
-                    bucket = ts - (ts % BUCKET_MS)
-                    USAGE_BUCKETS[bucket] = USAGE_BUCKETS.get(bucket, 0) + billable
+                account_buckets(ts, billable, model)
         fh.close()
     except Exception:
         pass
@@ -512,9 +543,9 @@ print(json.dumps({
     "sessions": sessions,
     "alerts": [],
     "usage_buckets": sorted(USAGE_BUCKETS.items()),
-    "opus_buckets": sorted(OPUS_BUCKETS.items()),
     "rate_limits": sorted(set(RATE_LIMITS)),
     "limit_hits": LIMIT_HITS,
+    "model_mix": sorted((k, v) for k, v in MODEL_MIX.items() if v > 0),
     "totals": {
         "active_sessions": len(sessions),
         "tokens_per_min": sum(s["tokens_per_min"] for s in sessions),

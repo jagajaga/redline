@@ -609,8 +609,8 @@ pub(crate) mod test_support {
             },
             usage_buckets: Vec::new(),
             rate_limits: Vec::new(),
-            opus_buckets: Vec::new(),
             limit_hits: Vec::new(),
+            model_mix: Vec::new(),
             governor: None,
         }
     }

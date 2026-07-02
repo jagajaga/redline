@@ -26,8 +26,8 @@ fn host_label(h: &Host) -> String {
     }
 }
 
-/// Format a cruise delta: `▲2.1×` above cruise, `▼0.6×` below, `⛔` when the
-/// tank is empty and still burning.
+/// Format the window throttle: `▲2.1×` burning faster than the pace that lands
+/// at the reset, `▼0.6×` slower, `⛔` when the tank is empty and still burning.
 pub fn delta_str(delta: f64) -> String {
     if delta.is_infinite() || delta >= ccwatch_core::governor::DELTA_EMPTY {
         "⛔".to_string()
@@ -55,8 +55,7 @@ fn mins(m: f64) -> String {
 }
 
 /// Menu-bar text next to the graph. Alerts dominate; then the governor's
-/// cruise delta (the throttle readout); then the raw burn rate. `⏻` when the
-/// daemon is unreachable.
+/// window throttle; then the raw burn rate. `⏻` when the daemon is unreachable.
 pub fn tray_title(s: &Snapshot, connected: bool, mode: crate::prefs::TitleMode) -> String {
     use crate::prefs::TitleMode as M;
     if !connected {
@@ -134,21 +133,31 @@ pub fn governor_line(s: &Snapshot) -> String {
     if let Some(reset) = w.resets_at {
         parts.push(format!("reset {}", clock(reset)));
     }
-    if let (Some(b), Some(d)) = (g.cruise.budget, g.cruise.delta) {
-        parts.push(format!(
-            "hour {}/{} {}",
-            tokens(g.cruise.used),
-            tokens(b),
-            delta_str(d)
-        ));
-    }
     if let Some(t) = &g.week {
         parts.push(week_str("wk", t));
     }
-    if let Some(t) = &g.week_opus {
-        parts.push(week_str("opus wk", t));
-    }
     parts.join(" · ")
+}
+
+/// The account's recent model mix: "mix: opus 62% · fable 34% · sonnet 4%".
+/// Returns an empty string when there's no usage (caller hides the row).
+pub fn mix_line(s: &Snapshot) -> String {
+    let total: u64 = s.model_mix.iter().map(|(_, v)| *v).sum();
+    if total == 0 {
+        return String::new();
+    }
+    let mut items: Vec<(&str, u64)> =
+        s.model_mix.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    items.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
+    let mix = items
+        .iter()
+        .map(|(k, v)| (k, *v as f64 / total as f64 * 100.0))
+        // Drop trace tiers that would just render "0%".
+        .filter(|(_, pct)| *pct >= 0.5)
+        .map(|(k, pct)| format!("{k} {pct:.0}%"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    format!("mix: {mix}")
 }
 
 /// Weekly readout: "wk 62% · resets Tue 20:00" (or used-only if no budget).
@@ -522,7 +531,7 @@ mod tests {
             range_min: Some(50.0),
             wall_at: Some(3_000_000),
         };
-        s.governor = Some(GovernorStatus { window: tank, cruise: tank, week: None, week_opus: None });
+        s.governor = Some(GovernorStatus { window: tank, week: None });
         use crate::prefs::TitleMode as M;
         assert_eq!(tray_title(&s, true, M::Throttle), "▲3.6×");
         assert_eq!(tray_title(&s, true, M::Rate), "46k");
@@ -546,7 +555,7 @@ mod tests {
     #[test]
     fn governor_line_reads_like_a_gauge() {
         let mut s = base();
-        let mut tank = Tank {
+        let window = Tank {
             used: 620_000,
             budget: Some(1_000_000),
             budget_source: BudgetSource::Learned,
@@ -558,22 +567,24 @@ mod tests {
             range_min: Some(98.0),
             wall_at: Some(999_999),
         };
-        let cruise = {
-            tank.budget = Some(300_000);
-            tank.used = 150_000;
-            tank.delta = Some(0.5);
-            tank
-        };
-        let mut window = tank;
-        window.budget = Some(1_000_000);
-        window.used = 620_000;
-        window.delta = Some(2.0);
-        s.governor = Some(GovernorStatus { window, cruise, week: None, week_opus: None });
+        s.governor = Some(GovernorStatus { window, week: None });
         let line = governor_line(&s);
         assert!(line.contains("throttle ▲2.0×"), "{line}");
         assert!(line.contains("range 1h38m"), "{line}");
         assert!(line.contains("tank ~38%"), "learned budgets marked ~: {line}");
-        assert!(line.contains("hour 150k/300k ▼0.5×"), "{line}");
+        assert!(!line.contains("hour"), "no self-set hourly cruise anymore: {line}");
+    }
+
+    #[test]
+    fn mix_line_shows_shares_biggest_first() {
+        let mut s = base();
+        assert_eq!(mix_line(&s), "", "no mix data → empty (caller hides row)");
+        s.model_mix = vec![
+            ("opus".into(), 60),
+            ("fable".into(), 30),
+            ("sonnet".into(), 10),
+        ];
+        assert_eq!(mix_line(&s), "mix: opus 60% · fable 30% · sonnet 10%");
     }
 
     #[test]

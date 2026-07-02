@@ -1,12 +1,13 @@
 //! The Governor — fuel-gauge math over bucketed usage.
 //!
-//! Input: `(bucket_ts_ms, billable_tokens)` pairs (5-minute buckets) covering
-//! the recent horizon, merged across every host. Output: two [`Tank`]s —
+//! Input: `(bucket_ts_ms, weighted_tokens)` pairs (5-minute buckets) covering
+//! the recent horizon, merged across every host. Output: the two real
+//! Anthropic caps as [`Tank`]s —
 //!
 //! - **plan window**: a fixed-length block (default 5h, mirroring Anthropic's
 //!   session window) anchored at the first activity after the previous window
 //!   expired;
-//! - **cruise**: a rolling 1-hour budget the user sets as a self-governor.
+//! - **weekly**: the 7-day account-wide limit (see [`weekly_tank`]).
 //!
 //! Pure functions over explicit `now_ms` so every edge is unit-testable.
 
@@ -200,52 +201,7 @@ pub fn compute(
         None => make_tank(0, w_budget, w_source, now_ms, None, rate_per_min, now_ms),
     };
 
-    // Rolling cruise tank (last 60 min vs hourly budget). Its "reset" is a
-    // fiction — the horizon one hour out — which gives cruise/delta semantics
-    // of "at this pace you'd use X% of an hourly budget".
-    let hour_ms = 3_600_000;
-    let used_hour = sum_range(buckets, now_ms - hour_ms, now_ms);
-    let cruise = match cfg.governor_hourly_budget {
-        Some(b) => {
-            let remaining = b.saturating_sub(used_hour);
-            let cruise_per_min = remaining as f64 / 60.0;
-            let delta = if cruise_per_min > 0.0 {
-                Some(rate_per_min / cruise_per_min)
-            } else if rate_per_min > 0.0 {
-                Some(DELTA_EMPTY)
-            } else {
-                None
-            };
-            Tank {
-                used: used_hour,
-                budget: Some(b),
-                budget_source: BudgetSource::Config,
-                window_start: now_ms - hour_ms,
-                resets_at: None,
-                rate_per_min,
-                cruise_per_min: Some(cruise_per_min),
-                delta,
-                range_min: (rate_per_min > 0.0).then(|| remaining as f64 / rate_per_min),
-                wall_at: None,
-            }
-        }
-        None => make_tank(
-            used_hour,
-            None,
-            BudgetSource::Unknown,
-            now_ms - hour_ms,
-            None,
-            rate_per_min,
-            now_ms,
-        ),
-    };
-
-    GovernorStatus {
-        window,
-        cruise,
-        week: None,
-        week_opus: None,
-    }
+    GovernorStatus { window, week: None }
 }
 
 /// Resolve a "resets …" marker into an epoch. Handles "8pm (Europe/Paris)",
@@ -344,13 +300,14 @@ pub fn weekly_reset_after(hits: &[LimitHit], now_ms: i64) -> Option<i64> {
     Some(r)
 }
 
-/// Build a weekly tank (all-models or Opus). `budget` is config-or-learned.
+/// Build the weekly tank: a single account-wide 7-day limit that every model
+/// drains together. `buckets` are Opus-equivalent (weighted) tokens; `budget`
+/// is config-or-learned.
 pub fn weekly_tank(
     buckets: &[(i64, u64)],
     hits: &[LimitHit],
     now_ms: i64,
     cfg_budget: Option<u64>,
-    weekly_opus: bool,
 ) -> Option<Tank> {
     // Reset anchor: parsed marker, else a rolling 7-day horizon.
     let reset = weekly_reset_after(hits, now_ms);
@@ -359,7 +316,7 @@ pub fn weekly_tank(
         None => (now_ms - WEEK_MS, None),
     };
     let used = sum_range(buckets, start, now_ms);
-    let (budget, source) = match (cfg_budget, learn_weekly(buckets, hits, !weekly_opus).map(|(b, _)| b)) {
+    let (budget, source) = match (cfg_budget, learn_weekly(buckets, hits, true).map(|(b, _)| b)) {
         (Some(b), _) => (Some(b), BudgetSource::Config),
         (None, Some(b)) => (Some(b), BudgetSource::Learned),
         _ => (None, BudgetSource::Unknown),
@@ -481,34 +438,28 @@ pub fn learn(
     best
 }
 
-/// Alert when a weekly tank will empty before its reset.
+/// Alert when the weekly tank will empty before its reset.
 pub fn weekly_wall_alert(g: &GovernorStatus, now_ms: i64) -> Option<Alert> {
-    for (tank, label) in [
-        (g.week.as_ref(), "weekly limit"),
-        (g.week_opus.as_ref(), "weekly Opus limit"),
-    ] {
-        let Some(t) = tank else { continue };
-        let (Some(wall), Some(reset)) = (t.wall_at, t.resets_at) else {
-            continue;
-        };
-        if t.rate_per_min < 1.0 {
-            continue;
-        }
-        let days = (reset - now_ms) as f64 / 86_400_000.0;
-        let to_wall_h = (wall - now_ms) as f64 / 3_600_000.0;
-        return Some(Alert {
-            severity: Severity::Critical,
-            kind: AlertKind::BudgetWall,
-            subject: label.into(),
-            session_id: String::new(),
-            message: format!(
-                "at this pace you hit the {label} in ~{:.0}h — {:.1}d before reset",
-                to_wall_h, days
-            ),
-            since_ms: now_ms,
-        });
+    let t = g.week.as_ref()?;
+    let (Some(wall), Some(reset)) = (t.wall_at, t.resets_at) else {
+        return None;
+    };
+    if t.rate_per_min < 1.0 {
+        return None;
     }
-    None
+    let days = (reset - now_ms) as f64 / 86_400_000.0;
+    let to_wall_h = (wall - now_ms) as f64 / 3_600_000.0;
+    Some(Alert {
+        severity: Severity::Critical,
+        kind: AlertKind::BudgetWall,
+        subject: "weekly limit".into(),
+        session_id: String::new(),
+        message: format!(
+            "at this pace you hit the weekly limit in ~{:.0}h — {:.1}d before reset",
+            to_wall_h, days
+        ),
+        since_ms: now_ms,
+    })
 }
 
 #[cfg(test)]
@@ -521,7 +472,6 @@ mod tests {
     fn cfg() -> Config {
         Config {
             governor_window_budget: Some(1_000_000),
-            governor_hourly_budget: Some(300_000),
             ..Config::default()
         }
     }
@@ -633,15 +583,6 @@ mod tests {
     }
 
     #[test]
-    fn cruise_tank_rolls_hourly() {
-        let b = buckets(&[(90, 500_000), (30, 100_000), (2, 50_000)]);
-        let g = compute(&b, &[], NOW, &cfg(), None);
-        assert_eq!(g.cruise.used, 150_000, "only last-hour usage");
-        assert_eq!(g.cruise.budget, Some(300_000));
-        assert!(g.cruise.delta.unwrap() > 1.0, "10k/min vs 2.5k/min cruise");
-    }
-
-    #[test]
     fn learned_budget_from_429s() {
         // Transient 429 30 min ago at 450k window usage → soft lower bound
         // (work resumed 5 min later — a different bucket, no blackout).
@@ -738,7 +679,7 @@ mod tests {
             (4 * 24 * 60, 200_000_000),
             (24 * 60, 60_000_000),
         ]);
-        let t = weekly_tank(&b, &hits, NOW, None, false).unwrap();
+        let t = weekly_tank(&b, &hits, NOW, None).unwrap();
         assert_eq!(t.budget, Some(400_000_000));
         assert_eq!(t.budget_source, BudgetSource::Learned);
         assert_eq!(t.resets_at, Some(reset));
@@ -746,7 +687,7 @@ mod tests {
         assert!(t.used > 0);
 
         // Config overrides the learned value.
-        let t2 = weekly_tank(&b, &hits, NOW, Some(999_000_000), false).unwrap();
+        let t2 = weekly_tank(&b, &hits, NOW, Some(999_000_000)).unwrap();
         assert_eq!(t2.budget, Some(999_000_000));
         assert_eq!(t2.budget_source, BudgetSource::Config);
     }

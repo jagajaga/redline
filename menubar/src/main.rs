@@ -29,6 +29,7 @@ fn main() -> anyhow::Result<()> {
         println!("title:   {}", summary::tray_title(&snap, true, prefs::TitleMode::Throttle));
         println!("tooltip: {}", summary::tooltip(&snap));
         println!("gov:     {}", summary::governor_line(&snap));
+        println!("mix:     {}", summary::mix_line(&snap));
         let rates: Vec<f64> = snap.sessions.iter().map(|s| s.tokens_per_min).collect();
         println!("load:    {}  (per-session tok/min)", graph::unicode_spark(&rates));
         println!("menu:");
@@ -162,6 +163,7 @@ mod macos {
         menu: Menu,
         header: MenuItem,
         governor: MenuItem,
+        mix: MenuItem,
         alerts: Vec<MenuItem>,
         sessions: Vec<SessionRow>,
         open_tui: MenuItem,
@@ -173,13 +175,14 @@ mod macos {
     }
 
     /// Index of the first dynamic row (after header + governor + separator).
-    const DYN_BASE: usize = 3;
+    const DYN_BASE: usize = 4;
 
     impl TrayMenu {
         fn new(prefs: &Prefs) -> Self {
             let menu = Menu::new();
             let header = MenuItem::new("connecting…", false, None);
             let governor = MenuItem::new("governor: no data", false, None);
+            let mix = MenuItem::new("", false, None);
             let open_tui = MenuItem::new("Open TUI dashboard", true, None);
             let quit = MenuItem::new("Quit ccwatch", true, None);
 
@@ -212,6 +215,7 @@ mod macos {
 
             let _ = menu.append(&header);
             let _ = menu.append(&governor);
+            let _ = menu.append(&mix);
             let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&settings);
@@ -221,6 +225,7 @@ mod macos {
                 menu,
                 header,
                 governor,
+                mix,
                 alerts: Vec::new(),
                 sessions: Vec::new(),
                 open_tui,
@@ -503,6 +508,10 @@ mod macos {
                 tray.set_title(Some(summary::tray_title(&view, true, prefs.title_mode)));
                 let _ = tray.set_tooltip(Some(summary::tooltip(&snap)));
                 tray_menu.governor.set_text(summary::governor_line(&snap));
+                let mix = summary::mix_line(&snap);
+                tray_menu
+                    .mix
+                    .set_text(if mix.is_empty() { "mix: —".into() } else { mix });
                 actions = tray_menu.apply(&model, &|entry| {
                     let hist = session_hist.get(&entry.id)?;
                     let rgba = graph::render_spark(&hist.values(), burn);

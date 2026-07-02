@@ -241,18 +241,24 @@ pub fn merge(local: Snapshot, remotes: &[Snapshot]) -> Snapshot {
     }
     rate_limits.sort_unstable();
     rate_limits.dedup();
-    // Weekly caps are per-account: opus buckets and limit markers combine
-    // across every host too.
-    let opus_lists: Vec<&[(i64, u64)]> = std::iter::once(&local.opus_buckets[..])
-        .chain(remotes.iter().map(|r| &r.opus_buckets[..]))
-        .collect();
-    let opus_buckets = crate::governor::merge_buckets(&opus_lists);
+    // Weekly cap is per-account: limit markers combine across every host too.
     let mut limit_hits = local.limit_hits.clone();
     for r in remotes {
         limit_hits.extend(&r.limit_hits);
     }
     limit_hits.sort_by_key(|h| h.at_ms);
     limit_hits.dedup();
+
+    // Model mix is per-account too — sum raw tokens per tier across hosts.
+    let mut mix: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for (tier, v) in local
+        .model_mix
+        .iter()
+        .chain(remotes.iter().flat_map(|r| r.model_mix.iter()))
+    {
+        *mix.entry(tier.clone()).or_insert(0) += v;
+    }
+    let model_mix = mix.into_iter().collect();
 
     Snapshot {
         generated_at: local.generated_at,
@@ -261,8 +267,8 @@ pub fn merge(local: Snapshot, remotes: &[Snapshot]) -> Snapshot {
         totals,
         usage_buckets,
         rate_limits,
-        opus_buckets,
         limit_hits,
+        model_mix,
         governor: None,
     }
 }

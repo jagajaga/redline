@@ -26,16 +26,49 @@ pub struct Config {
     pub history_retain_secs: i64,
     /// Governor: plan-window length (Anthropic's session window is 5h).
     pub governor_window_hours: i64,
-    /// Governor: plan-window budget in billable tokens. None → learned/unknown.
+    /// Governor: plan-window budget (Opus-equivalent tokens). None → learned
+    /// from observed 429 walls.
     pub governor_window_budget: Option<u64>,
-    /// Governor: self-set rolling hourly budget in billable tokens.
-    pub governor_hourly_budget: Option<u64>,
-    /// Governor: weekly all-models budget. None → learned from weekly markers.
+    /// Governor: weekly budget (Opus-equivalent tokens). None → learned from
+    /// weekly markers.
     pub governor_week_budget: Option<u64>,
-    /// Governor: weekly Opus-only budget. None → learned.
-    pub governor_week_opus_budget: Option<u64>,
+    /// Per-model weights, normalised to Opus = 1.0. The governor's tanks
+    /// accumulate `raw_tokens × weight` (Opus-equivalent units) so the learned
+    /// ceiling stays valid as the model mix shifts between wall-hits: 1M Opus
+    /// tokens and ~500k Fable tokens (weight 2.0) draw the same. Defaults track
+    /// Anthropic's published per-token price ratios — a constant 1:5
+    /// input:output ratio across models makes a single scalar per model
+    /// well-defined regardless of the input/output split within a message.
+    pub weight_opus: f64,
+    pub weight_sonnet: f64,
+    pub weight_haiku: f64,
+    pub weight_fable: f64,
+    /// Fallback weight for models that match no known tier.
+    pub weight_default: f64,
     /// Terminal app for "Open TUI dashboard" (empty → auto-detect).
     pub terminal_app: String,
+}
+
+/// Which weight/cost tier a model string belongs to. Substring match on the
+/// lowercased id; `"other"` when nothing matches.
+pub fn tier_of(model: Option<&str>) -> &'static str {
+    match model {
+        Some(m) => {
+            let m = m.to_ascii_lowercase();
+            if m.contains("opus") {
+                "opus"
+            } else if m.contains("sonnet") {
+                "sonnet"
+            } else if m.contains("haiku") {
+                "haiku"
+            } else if m.contains("fable") || m.contains("mythos") {
+                "fable"
+            } else {
+                "other"
+            }
+        }
+        None => "other",
+    }
 }
 
 impl Default for Config {
@@ -52,10 +85,28 @@ impl Default for Config {
             history_retain_secs: 1800,
             governor_window_hours: 5,
             governor_window_budget: None,
-            governor_hourly_budget: None,
             governor_week_budget: None,
-            governor_week_opus_budget: None,
+            // Opus-normalised price ratios: Fable $50/Mtok output vs Opus $25
+            // → 2.0; Sonnet $15 → 0.6; Haiku $5 → 0.2 (input ratios coincide).
+            weight_opus: 1.0,
+            weight_sonnet: 0.6,
+            weight_haiku: 0.2,
+            weight_fable: 2.0,
+            weight_default: 1.0,
             terminal_app: String::new(),
+        }
+    }
+}
+
+impl Config {
+    /// Opus-equivalent weight for a model tier (see [`tier_of`]).
+    pub fn weight_for(&self, tier: &str) -> f64 {
+        match tier {
+            "opus" => self.weight_opus,
+            "sonnet" => self.weight_sonnet,
+            "haiku" => self.weight_haiku,
+            "fable" => self.weight_fable,
+            _ => self.weight_default,
         }
     }
 }
@@ -110,21 +161,16 @@ impl Config {
                         cfg.governor_window_budget = Some(n);
                     }
                 }
-                "governor_hourly_budget" | "hourly_budget" => {
-                    if let Ok(n) = v.replace('_', "").parse() {
-                        cfg.governor_hourly_budget = Some(n);
-                    }
-                }
                 "week_budget" | "governor_week_budget" => {
                     if let Ok(n) = v.replace('_', "").parse() {
                         cfg.governor_week_budget = Some(n);
                     }
                 }
-                "week_opus_budget" | "governor_week_opus_budget" => {
-                    if let Ok(n) = v.replace('_', "").parse() {
-                        cfg.governor_week_opus_budget = Some(n);
-                    }
-                }
+                "weight_opus" => set_f64(&mut cfg.weight_opus, v),
+                "weight_sonnet" => set_f64(&mut cfg.weight_sonnet, v),
+                "weight_haiku" => set_f64(&mut cfg.weight_haiku, v),
+                "weight_fable" => set_f64(&mut cfg.weight_fable, v),
+                "weight_default" => set_f64(&mut cfg.weight_default, v),
                 "terminal_app" | "terminal" => cfg.terminal_app = v.to_string(),
                 _ => {}
             }
@@ -146,5 +192,29 @@ fn set_usize(target: &mut usize, v: &str) {
 fn set_f64(target: &mut f64, v: &str) {
     if let Ok(n) = v.parse() {
         *target = n;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tier_and_weight_match_model_ids() {
+        assert_eq!(tier_of(Some("claude-opus-4-8")), "opus");
+        assert_eq!(tier_of(Some("claude-sonnet-5")), "sonnet");
+        assert_eq!(tier_of(Some("claude-haiku-4-5")), "haiku");
+        assert_eq!(tier_of(Some("claude-fable-5")), "fable");
+        assert_eq!(tier_of(Some("claude-mythos-5")), "fable");
+        assert_eq!(tier_of(Some("something-else")), "other");
+        assert_eq!(tier_of(None), "other");
+
+        let cfg = Config::default();
+        // Opus-normalised price ratios.
+        assert_eq!(cfg.weight_for("opus"), 1.0);
+        assert_eq!(cfg.weight_for("fable"), 2.0);
+        assert_eq!(cfg.weight_for("sonnet"), 0.6);
+        assert_eq!(cfg.weight_for("haiku"), 0.2);
+        assert_eq!(cfg.weight_for("other"), 1.0);
     }
 }

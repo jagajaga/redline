@@ -218,15 +218,21 @@ fn probe_emits_valid_snapshot() {
     assert_eq!(snap.totals.active_sessions, 1);
     assert!(snap.totals.cache_hit_pct > 90.0);
 
-    // Governor usage buckets: all three messages are within the 6h horizon;
-    // billable per message = 100 + out + 50.
+    // Governor usage buckets are Opus-equivalent (weighted). The three main
+    // messages are Opus (×1.0): billable 100+out+50 each = 10_450. The
+    // sidechain is Haiku (×0.2): 640 billable → 128 weighted. Sum = 10_578.
     let bucket_sum: u64 = snap.usage_buckets.iter().map(|(_, v)| v).sum();
     assert_eq!(
         bucket_sum,
-        300 + 10_000 + 150 + 640,
-        "buckets include the sidechain's billable tokens"
+        10_450 + 128,
+        "usage buckets are weighted (Opus-equivalent) tokens"
     );
     assert!(snap.usage_buckets.windows(2).all(|w| w[0].0 < w[1].0), "buckets sorted");
+
+    // Model mix is raw billable per tier: opus 10_450, haiku 640.
+    let mix: std::collections::HashMap<_, _> = snap.model_mix.iter().cloned().collect();
+    assert_eq!(mix.get("opus"), Some(&10_450));
+    assert_eq!(mix.get("haiku"), Some(&640));
 
     let _ = std::fs::remove_dir_all(&root);
 }

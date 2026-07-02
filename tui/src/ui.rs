@@ -65,12 +65,6 @@ fn governor_segment(app: &App) -> String {
             seg.push_str(&format!(" · wk {pct:.0}%"));
         }
     }
-    if let Some(t) = &g.week_opus {
-        if let Some(b) = t.budget {
-            let pct = 100.0 - (t.used as f64 / b as f64 * 100.0).min(100.0);
-            seg.push_str(&format!(" · opus {pct:.0}%"));
-        }
-    }
     seg
 }
 
@@ -816,10 +810,50 @@ fn draw_details_popup(f: &mut Frame, area: Rect, app: &App) {
         }
         None => lines.push(Line::from("nothing selected")),
     }
+
+    // Account-wide model mix — always shown, since the governor's fuel is now
+    // metered in Opus-equivalent (weighted) units and the mix explains it.
+    if !app.snapshot.model_mix.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "── account (recent) ──",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<14}", "model mix"), dim),
+            Span::raw(model_mix_str(&app.snapshot.model_mix)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<14}", ""), dim),
+            Span::styled(
+                "tanks meter Opus-equivalent tokens (Fable ×2, Sonnet ×0.6, Haiku ×0.2)",
+                dim,
+            ),
+        ]));
+    }
+
     f.render_widget(
         Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+/// "opus 62% · fable 34% · sonnet 4%" from raw per-tier billable tokens,
+/// biggest share first. Empty when there's no usage.
+fn model_mix_str(mix: &[(String, u64)]) -> String {
+    let total: u64 = mix.iter().map(|(_, v)| *v).sum();
+    if total == 0 {
+        return "—".to_string();
+    }
+    let mut items: Vec<(&str, u64)> = mix.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    items.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
+    items
+        .iter()
+        .map(|(k, v)| (k, *v as f64 / total as f64 * 100.0))
+        .filter(|(_, pct)| *pct >= 0.5)
+        .map(|(k, pct)| format!("{k} {pct:.0}%"))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn draw_fuzzy(f: &mut Frame, area: Rect, query: &str, results: &[crate::app::JumpItem], cursor: usize) {
@@ -1104,9 +1138,7 @@ mod tests {
         };
         snap.governor = Some(ccwatch_core::model::GovernorStatus {
             window: tank,
-            cruise: tank,
             week: None,
-            week_opus: None,
         });
         snap.alerts = vec![
             Alert { severity: Severity::Critical, kind: AlertKind::RunawayLoop, subject: "webapp".into(), session_id: "s1".into(), message: "62k tok/min · no user turn 7m · agent×2".into(), since_ms: 0 },
@@ -1209,7 +1241,7 @@ mod tests {
             range_min: Some(50.0),
             wall_at: Some(10_000 + 50 * 60_000),
         };
-        snap.governor = Some(GovernorStatus { window: tank, cruise: tank, week: None, week_opus: None });
+        snap.governor = Some(GovernorStatus { window: tank, week: None });
         let app = app_with(snap);
         let s = render(&app);
         assert!(s.contains("▲3.6×"), "delta missing from top bar:\n{s}");
