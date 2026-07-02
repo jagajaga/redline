@@ -34,6 +34,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match &app.mode {
         Mode::Fuzzy { query, results, cursor } => draw_fuzzy(f, area, query, results, *cursor),
         Mode::Confirm(p) => draw_confirm(f, area, &p.prompt),
+        Mode::Details => draw_details_popup(f, area, app),
         Mode::Normal => {}
     }
 }
@@ -545,8 +546,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let hint = match &app.mode {
         Mode::Fuzzy { .. } => " type to filter · ↑↓ move · enter jump · esc cancel ",
         Mode::Confirm(_) => " y confirm · n/esc cancel ",
+        Mode::Details => " esc/d close ",
         Mode::Normal => {
-            " / jump · ↑↓ move · enter expand · k kill · p pause · r resume · f filter-idle · q quit "
+            " / jump · ↑↓ · enter expand · d details · x hide-done · f hide-idle · k kill · p pause · r resume · q quit "
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::Black).bg(Color::Gray))];
@@ -554,6 +556,78 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(format!("  {st}"), Style::default().fg(Color::Yellow)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Full-detail popup for the selected row (`d`).
+fn draw_details_popup(f: &mut Frame, area: Rect, app: &App) {
+    let popup = centered(72, 70, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" DETAILS (esc to close) ")
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let mut lines: Vec<Line> = Vec::new();
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut kv = |k: &str, v: String| {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{k:<14}"), dim),
+            Span::raw(v),
+        ]));
+    };
+    match app.selected_row().map(|vr| vr.row) {
+        Some(RowRef::Session(si)) => {
+            let s = &app.snapshot.sessions[si];
+            let t = &s.tokens;
+            kv("session", s.name.clone());
+            kv("id", s.id.clone());
+            kv("host", s.host.label());
+            kv("pid", s.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()));
+            kv("kind", format!("{} · {} · v{}", s.kind, s.entrypoint, s.version));
+            kv("model", s.model.clone().unwrap_or_else(|| "-".into()));
+            kv("cwd", s.cwd.clone());
+            if let Some(ts) = s.started_at {
+                kv("started", format!("{} ({} ago)", format::clock(ts), format::ago(ts, app.now_ms)));
+            }
+            if let Some(ts) = s.last_activity {
+                kv("last activity", format!("{} ago", format::ago(ts, app.now_ms)));
+            }
+            kv("burn", format!("{} tok/min", format::rate(s.tokens_per_min)));
+            kv("tokens", format!(
+                "in {} · out {} · cache-write {} · cache-read {}",
+                format::tokens(t.input), format::tokens(t.output),
+                format::tokens(t.cache_write), format::tokens(t.cache_read)));
+            kv("messages", format!("{} · web search {} · web fetch {}", t.messages, t.web_search, t.web_fetch));
+            kv("resources", format!("cpu {:.0}% · rss {} MB", s.cpu_pct, s.rss_mb));
+            let running = s.agents.iter().filter(|a| matches!(a.state, AgentState::Running)).count();
+            kv("agents", format!("{} running · {} total", running, s.agents.len()));
+            let done = s.tasks.iter().filter(|t| t.status == "completed").count();
+            kv("tasks", format!("{done}/{} done", s.tasks.len()));
+            for w in &s.watchers {
+                kv("watcher", format!("{:?} {} — {}", w.kind, w.name, w.detail));
+            }
+        }
+        Some(RowRef::Agent(si, path)) => {
+            let s = &app.snapshot.sessions[si];
+            if let Some(a) = agent_at(&s.agents, &path) {
+                kv("agent", a.description.clone());
+                kv("type", a.subagent_type.clone());
+                kv("model", a.model.clone().unwrap_or_else(|| "-".into()));
+                kv("state", match a.state { AgentState::Running => "running".into(), AgentState::Finished => "done".into() });
+                if let Some(ts) = a.started_at {
+                    kv("started", format!("{} ({} ago)", format::clock(ts), format::ago(ts, app.now_ms)));
+                }
+                kv("children", a.children.len().to_string());
+                kv("parent", s.name.clone());
+                kv("id", a.id.clone());
+            }
+        }
+        None => lines.push(Line::from("nothing selected")),
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 fn draw_fuzzy(f: &mut Frame, area: Rect, query: &str, results: &[crate::app::JumpItem], cursor: usize) {
@@ -933,6 +1007,17 @@ mod tests {
         app.fuzzy_input('b');
         let s = render(&app);
         assert!(s.contains("jump (fuzzy)"), "overlay missing:\n{s}");
+    }
+
+    #[test]
+    fn renders_details_popup() {
+        let snap = snapshot(vec![session("s1", "webapp", vec![agent("a1", "scan", vec![])])]);
+        let mut app = app_with(snap);
+        app.mode = crate::app::Mode::Details;
+        let s = render(&app);
+        assert!(s.contains("DETAILS (esc to close)"), "popup missing:\n{s}");
+        assert!(s.contains("cache-write"), "token detail missing:\n{s}");
+        assert!(s.contains("agents"), "agent summary missing:\n{s}");
     }
 
     #[test]

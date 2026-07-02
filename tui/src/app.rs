@@ -48,6 +48,8 @@ pub enum Mode {
         cursor: usize,
     },
     Confirm(PendingAction),
+    /// Full-detail popup for the selected row.
+    Details,
 }
 
 pub struct App {
@@ -57,6 +59,8 @@ pub struct App {
     pub expanded: HashSet<String>,
     pub selected: usize,
     pub hide_idle: bool,
+    /// Hide finished agents from the tree (history vs. live view).
+    pub hide_done: bool,
     pub mode: Mode,
     pub should_quit: bool,
     pub now_ms: i64,
@@ -74,6 +78,7 @@ impl App {
             expanded: HashSet::new(),
             selected: 0,
             hide_idle: false,
+            hide_done: false,
             mode: Mode::Normal,
             should_quit: false,
             now_ms,
@@ -110,7 +115,15 @@ impl App {
                 depth: 0,
             });
             if self.expanded.contains(&s.id) {
-                push_agents(&s.agents, si, &mut Vec::new(), 1, &self.expanded, &mut rows);
+                push_agents(
+                    &s.agents,
+                    si,
+                    &mut Vec::new(),
+                    1,
+                    &self.expanded,
+                    self.hide_done,
+                    &mut rows,
+                );
             }
         }
         rows
@@ -381,9 +394,14 @@ fn push_agents(
     path: &mut Vec<usize>,
     depth: usize,
     expanded: &HashSet<String>,
+    hide_done: bool,
     out: &mut Vec<VisibleRow>,
 ) {
+    use ccwatch_core::model::AgentState;
     for (ai, a) in agents.iter().enumerate() {
+        if hide_done && matches!(a.state, AgentState::Finished) {
+            continue;
+        }
         path.push(ai);
         out.push(VisibleRow {
             row: RowRef::Agent(si, path.clone()),
@@ -391,7 +409,7 @@ fn push_agents(
             depth,
         });
         if expanded.contains(&a.id) && !a.children.is_empty() {
-            push_agents(&a.children, si, path, depth + 1, expanded, out);
+            push_agents(&a.children, si, path, depth + 1, expanded, hide_done, out);
         }
         path.pop();
     }
@@ -610,6 +628,21 @@ mod tests {
         app.stage_action(ActionKind::Pause);
         assert!(matches!(app.mode, Mode::Normal));
         assert!(app.status.as_deref().unwrap_or("").contains("local-only"));
+    }
+
+    #[test]
+    fn hide_done_filters_finished_agents() {
+        let mut done = agent("a-done", "finished work", vec![]);
+        done.state = ccwatch_core::model::AgentState::Finished;
+        let running = agent("a-run", "live work", vec![]);
+        let snap = snapshot(vec![session("s1", "busy", vec![done, running])]);
+        let mut app = app_with(snap);
+        app.toggle_expand(); // expand the session
+        assert_eq!(app.visible_rows().len(), 3, "session + 2 agents");
+        app.hide_done = true;
+        let rows = app.visible_rows();
+        assert_eq!(rows.len(), 2, "session + only the running agent");
+        assert_eq!(rows[1].key, "a-run");
     }
 
     #[test]

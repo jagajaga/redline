@@ -57,17 +57,42 @@ fn mins(m: f64) -> String {
 /// Menu-bar text next to the graph. Alerts dominate; then the governor's
 /// cruise delta (the throttle readout); then the raw burn rate. `⏻` when the
 /// daemon is unreachable.
-pub fn tray_title(s: &Snapshot, connected: bool) -> String {
+pub fn tray_title(s: &Snapshot, connected: bool, mode: crate::prefs::TitleMode) -> String {
+    use crate::prefs::TitleMode as M;
     if !connected {
         return "⏻".to_string();
     }
-    let delta = s.governor.as_ref().and_then(|g| g.primary_delta());
-    match (delta, s.alerts.len()) {
-        // The throttle stays visible even when alerts fire.
-        (Some(d), n) if n > 0 => format!("{} ⚠{n}", delta_str(d)),
-        (Some(d), _) => delta_str(d),
-        (None, n) if n > 0 => format!("⚠{n}"),
-        (None, _) => rate(s.totals.tokens_per_min),
+    let main = match mode {
+        M::Throttle => s
+            .governor
+            .as_ref()
+            .and_then(|g| g.primary_delta())
+            .map(delta_str)
+            .unwrap_or_else(|| rate(s.totals.tokens_per_min)),
+        M::Rate => rate(s.totals.tokens_per_min),
+        M::Range => s
+            .governor
+            .as_ref()
+            .and_then(|g| g.window.range_min)
+            .map(mins)
+            .unwrap_or_else(|| "—".into()),
+        M::Tank => s
+            .governor
+            .as_ref()
+            .and_then(|g| {
+                let w = &g.window;
+                w.budget
+                    .map(|b| format!("{:.0}%", 100.0 - (w.used as f64 / b as f64 * 100.0).min(100.0)))
+            })
+            .unwrap_or_else(|| "—".into()),
+        M::Nothing => String::new(),
+    };
+    // Alerts always stay visible next to whatever the mode shows.
+    match (main.is_empty(), s.alerts.len()) {
+        (true, 0) => String::new(),
+        (true, n) => format!("⚠{n}"),
+        (false, 0) => main,
+        (false, n) => format!("{main} ⚠{n}"),
     }
 }
 
@@ -308,8 +333,8 @@ mod tests {
     #[test]
     fn title_alerts_rate_and_disconnected() {
         let mut s = base();
-        assert_eq!(tray_title(&s, true), "46k");
-        assert_eq!(tray_title(&s, false), "⏻");
+        assert_eq!(tray_title(&s, true, crate::prefs::TitleMode::Throttle), "46k");
+        assert_eq!(tray_title(&s, false, crate::prefs::TitleMode::Throttle), "⏻");
         s.alerts.push(Alert {
             severity: Severity::Critical,
             kind: AlertKind::RunawayLoop,
@@ -318,8 +343,8 @@ mod tests {
             message: "burning".into(),
             since_ms: 0,
         });
-        // No governor data → alert count alone.
-        assert_eq!(tray_title(&s, true), "⚠1");
+        // No governor data → alert count next to the rate fallback.
+        assert_eq!(tray_title(&s, true, crate::prefs::TitleMode::Throttle), "46k ⚠1");
     }
 
     #[test]
@@ -427,7 +452,12 @@ mod tests {
             wall_at: Some(3_000_000),
         };
         s.governor = Some(GovernorStatus { window: tank, cruise: tank });
-        assert_eq!(tray_title(&s, true), "▲3.6×");
+        use crate::prefs::TitleMode as M;
+        assert_eq!(tray_title(&s, true, M::Throttle), "▲3.6×");
+        assert_eq!(tray_title(&s, true, M::Rate), "46k");
+        assert_eq!(tray_title(&s, true, M::Range), "50m");
+        assert_eq!(tray_title(&s, true, M::Tank), "50%");
+        assert_eq!(tray_title(&s, true, M::Nothing), "");
         // Alerts still win.
         s.alerts.push(Alert {
             severity: Severity::Critical,
@@ -437,7 +467,8 @@ mod tests {
             message: "wall".into(),
             since_ms: 0,
         });
-        assert_eq!(tray_title(&s, true), "▲3.6× ⚠1", "delta must stay visible with alerts");
+        assert_eq!(tray_title(&s, true, M::Throttle), "▲3.6× ⚠1", "delta stays visible with alerts");
+        assert_eq!(tray_title(&s, true, M::Nothing), "⚠1", "alerts still surface in graph-only mode");
     }
 
     #[test]

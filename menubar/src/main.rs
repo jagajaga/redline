@@ -12,6 +12,7 @@
 
 mod client;
 mod graph;
+mod prefs;
 mod summary;
 
 use ccwatch_core::Paths;
@@ -24,7 +25,7 @@ fn main() -> anyhow::Result<()> {
         client::ensure_daemon(&paths)?;
         let snap = client::latest_snapshot(&paths, Duration::from_secs(5), Duration::from_secs(3))?;
         let model = summary::menu_model(&snap);
-        println!("title:   {}", summary::tray_title(&snap, true));
+        println!("title:   {}", summary::tray_title(&snap, true, prefs::TitleMode::Throttle));
         println!("tooltip: {}", summary::tooltip(&snap));
         println!("gov:     {}", summary::governor_line(&snap));
         let rates: Vec<f64> = snap.sessions.iter().map(|s| s.tokens_per_min).collect();
@@ -62,9 +63,10 @@ mod macos {
     use std::sync::mpsc::{Receiver, TryRecvError};
     use std::time::{Duration, Instant};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use crate::prefs::{Prefs, TitleMode};
     use tray_icon::menu::{
-        Icon as MenuIcon, IconMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem,
-        Submenu,
+        CheckMenuItem, Icon as MenuIcon, IconMenuItem, Menu, MenuEvent, MenuId, MenuItem,
+        PredefinedMenuItem, Submenu,
     };
     use tray_icon::TrayIconBuilder;
 
@@ -78,6 +80,8 @@ mod macos {
     enum Action {
         Quit,
         OpenTui,
+        ToggleHideIdle,
+        SetTitleMode(TitleMode),
         Pause { pid: i32, name: String },
         Resume { pid: i32, name: String },
         Kill { pid: i32, name: String },
@@ -158,22 +162,43 @@ mod macos {
         sessions: Vec<SessionRow>,
         open_tui: MenuItem,
         quit: MenuItem,
+        hide_idle: CheckMenuItem,
+        mode_items: Vec<(TitleMode, CheckMenuItem)>,
     }
 
     /// Index of the first dynamic row (after header + governor + separator).
     const DYN_BASE: usize = 3;
 
     impl TrayMenu {
-        fn new() -> Self {
+        fn new(prefs: &Prefs) -> Self {
             let menu = Menu::new();
             let header = MenuItem::new("connecting…", false, None);
             let governor = MenuItem::new("governor: no data", false, None);
             let open_tui = MenuItem::new("Open TUI dashboard", true, None);
             let quit = MenuItem::new("Quit ccwatch", true, None);
+
+            // Settings ▸ hide-idle toggle + bar-content radio.
+            let settings = Submenu::new("Settings", true);
+            let hide_idle = CheckMenuItem::new("Hide idle sessions", true, prefs.hide_idle, None);
+            let _ = settings.append(&hide_idle);
+            let _ = settings.append(&PredefinedMenuItem::separator());
+            let bar_label = MenuItem::new("Show in menu bar:", false, None);
+            let _ = settings.append(&bar_label);
+            let mode_items: Vec<(TitleMode, CheckMenuItem)> = TitleMode::ALL
+                .iter()
+                .map(|m| {
+                    let item =
+                        CheckMenuItem::new(m.label(), true, *m == prefs.title_mode, None);
+                    let _ = settings.append(&item);
+                    (*m, item)
+                })
+                .collect();
+
             let _ = menu.append(&header);
             let _ = menu.append(&governor);
             let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&PredefinedMenuItem::separator());
+            let _ = menu.append(&settings);
             let _ = menu.append(&open_tui);
             let _ = menu.append(&quit);
             TrayMenu {
@@ -184,6 +209,16 @@ mod macos {
                 sessions: Vec::new(),
                 open_tui,
                 quit,
+                hide_idle,
+                mode_items,
+            }
+        }
+
+        /// Sync the Settings checkmarks with the prefs.
+        fn sync_prefs(&self, prefs: &Prefs) {
+            self.hide_idle.set_checked(prefs.hide_idle);
+            for (mode, item) in &self.mode_items {
+                item.set_checked(*mode == prefs.title_mode);
             }
         }
 
@@ -230,6 +265,10 @@ mod macos {
             let mut map = HashMap::new();
             map.insert(self.quit.id().clone(), Action::Quit);
             map.insert(self.open_tui.id().clone(), Action::OpenTui);
+            map.insert(self.hide_idle.id().clone(), Action::ToggleHideIdle);
+            for (mode, item) in &self.mode_items {
+                map.insert(item.id().clone(), Action::SetTitleMode(*mode));
+            }
             for (row, entry) in self.sessions.iter().zip(&model.sessions) {
                 if let summary::SessionAction::Signal { pid } = entry.action {
                     map.insert(
@@ -330,9 +369,11 @@ mod macos {
         let cfg = Config::load(&paths.config_file());
         let burn = cfg.burn_tokens_per_min;
         let terminal = terminal_app(&cfg.terminal_app);
+        let prefs_path = paths.ccwatch_dir().join("menubar.json");
+        let mut prefs = Prefs::load(&prefs_path);
 
         let event_loop = EventLoopBuilder::new().build();
-        let mut tray_menu = TrayMenu::new();
+        let mut tray_menu = TrayMenu::new(&prefs);
         let mut actions: HashMap<MenuId, Action> = HashMap::new();
         actions.insert(tray_menu.quit.id().clone(), Action::Quit);
         actions.insert(tray_menu.open_tui.id().clone(), Action::OpenTui);
@@ -356,6 +397,9 @@ mod macos {
         let paths = paths.clone();
         let mut last_sample = Instant::now() - SAMPLE_EVERY;
         let mut last_reconnect = Instant::now();
+        let mut last_snap: Option<ccwatch_core::model::Snapshot> = None;
+        // Render only when data or prefs changed — never on idle loop passes.
+        let mut render_needed = false;
 
         event_loop.run(move |_event, _target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(300));
@@ -387,8 +431,21 @@ mod macos {
                 }
             }
 
-            if let Some(snap) = latest {
-                let model = summary::menu_model(&snap);
+            if latest.is_some() {
+                last_snap = latest;
+                render_needed = true;
+            }
+            if render_needed && last_snap.is_some() {
+                render_needed = false;
+                let snap = last_snap.clone().unwrap();
+                // Prefs filter: idle sessions can be hidden from the dropdown.
+                let mut view = snap.clone();
+                if prefs.hide_idle {
+                    view.sessions.retain(|s| {
+                        !matches!(s.state, ccwatch_core::model::SessionState::Idle)
+                    });
+                }
+                let model = summary::menu_model(&view);
                 if last_sample.elapsed() >= SAMPLE_EVERY {
                     last_sample = Instant::now();
                     history.push(snap.totals.tokens_per_min);
@@ -411,7 +468,7 @@ mod macos {
                         model.sessions.iter().map(|e| e.id.as_str()).collect();
                     session_hist.retain(|id, _| live.contains(id.as_str()));
                 }
-                tray.set_title(Some(summary::tray_title(&snap, true)));
+                tray.set_title(Some(summary::tray_title(&view, true, prefs.title_mode)));
                 let _ = tray.set_tooltip(Some(summary::tooltip(&snap)));
                 tray_menu.governor.set_text(summary::governor_line(&snap));
                 actions = tray_menu.apply(&model, &|entry| {
@@ -426,6 +483,18 @@ mod macos {
                 match actions.get(&ev.id).cloned() {
                     Some(Action::Quit) => *control_flow = ControlFlow::Exit,
                     Some(Action::OpenTui) => open_tui(&terminal),
+                    Some(Action::ToggleHideIdle) => {
+                        prefs.hide_idle = !prefs.hide_idle;
+                        prefs.save(&prefs_path);
+                        tray_menu.sync_prefs(&prefs);
+                        render_needed = true;
+                    }
+                    Some(Action::SetTitleMode(mode)) => {
+                        prefs.title_mode = mode;
+                        prefs.save(&prefs_path);
+                        tray_menu.sync_prefs(&prefs);
+                        render_needed = true;
+                    }
                     Some(Action::Pause { pid, name }) => {
                         let (ok, msg) =
                             client::send_action(&paths, ActionRequest::PauseSession { pid });

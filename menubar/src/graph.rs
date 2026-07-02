@@ -20,8 +20,9 @@ pub const SCALE: usize = 2;
 /// Tray bar width / gap in pixels at [`SCALE`].
 pub const BAR_W: usize = 4;
 pub const BAR_GAP: usize = 2;
-/// Number of tray bars (history slots).
-pub const SLOTS: usize = 24;
+/// Number of tray bars (history slots). Kept compact — the graph is a
+/// glance, not a chart.
+pub const SLOTS: usize = 12;
 /// Tray icon pixel dimensions (well padding included).
 pub const PAD: usize = 2;
 pub const ICON_W: usize = SLOTS * (BAR_W + BAR_GAP) + BAR_GAP + PAD * 2;

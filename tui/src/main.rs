@@ -127,9 +127,24 @@ fn handle_key(app: &mut App, paths: &Paths, code: KeyCode) {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_mode(),
             _ => {}
         },
+        Mode::Details => match code {
+            KeyCode::Esc | KeyCode::Char('d') | KeyCode::Char('q') | KeyCode::Enter => {
+                app.cancel_mode()
+            }
+            _ => {}
+        },
         Mode::Normal => match code {
             KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
             KeyCode::Char('/') => app.open_fuzzy(),
+            KeyCode::Char('d') => {
+                if app.selected_row().is_some() {
+                    app.mode = Mode::Details;
+                }
+            }
+            KeyCode::Char('x') => {
+                app.hide_done = !app.hide_done;
+                app.move_selection(0);
+            }
             KeyCode::Up => app.move_selection(-1),
             KeyCode::Down => app.move_selection(1),
             KeyCode::Enter | KeyCode::Right | KeyCode::Left | KeyCode::Char(' ') => {
