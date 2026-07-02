@@ -108,6 +108,24 @@ fn probe_emits_valid_snapshot() {
     ));
     std::fs::write(proj.join(format!("{sid}.jsonl")), lines).unwrap();
 
+    // A sidechain for the running agent: its own tokens + in-flight tool.
+    let subdir = proj.join(sid).join("subagents");
+    std::fs::create_dir_all(&subdir).unwrap();
+    std::fs::write(
+        subdir.join("agent-r1demo.meta.json"),
+        r#"{"agentType":"Explore","description":"remote scan","toolUseId":"toolu_r1","spawnDepth":1}"#,
+    )
+    .unwrap();
+    let side = serde_json::json!({
+        "type": "assistant",
+        "timestamp": rfc3339(now_ms - 8_000),
+        "isSidechain": true,
+        "message": {"model": "claude-haiku-4-5", "usage": {"input_tokens": 40, "output_tokens": 600},
+                     "content": [{"type": "tool_use", "id": "toolu_r1_inner", "name": "Grep",
+                                  "input": {"pattern": "fn main"}}]}
+    });
+    std::fs::write(subdir.join("agent-r1demo.jsonl"), format!("{side}\n")).unwrap();
+
     let tasks = root.join("tasks").join(sid);
     std::fs::create_dir_all(&tasks).unwrap();
     std::fs::write(
@@ -137,19 +155,19 @@ fn probe_emits_valid_snapshot() {
     assert_eq!(s.model.as_deref(), Some("claude-opus-4-8"));
     assert!(matches!(s.host, Host::Local)); // retagged by fetch_remote later
 
-    // Full-history ledger.
-    assert_eq!(s.tokens.messages, 3);
-    assert_eq!(s.tokens.output, 10_000);
-    assert_eq!(s.tokens.input, 300);
+    // Full-history ledger — includes the sidechain rollup (+600 out, +40 in).
+    assert_eq!(s.tokens.messages, 4);
+    assert_eq!(s.tokens.output, 10_600);
+    assert_eq!(s.tokens.input, 340);
     assert_eq!(s.tokens.cache_write, 150);
     assert_eq!(s.tokens.cache_read, 27_000);
     assert_eq!(s.tokens.web_search, 3);
 
-    // Rate counts only the two in-window messages:
-    // (100+1000+50) + (100+2000+50) = 3300 billable over 5 min = 660/min.
+    // Rate counts the two in-window messages plus the sidechain rollup:
+    // (100+1000+50) + (100+2000+50) + (40+600) = 3940 billable / 5 min = 788.
     assert!(
-        (s.tokens_per_min - 660.0).abs() < 1.0,
-        "expected ~660 tok/min, got {}",
+        (s.tokens_per_min - 788.0).abs() < 1.0,
+        "expected ~788 tok/min, got {}",
         s.tokens_per_min
     );
 
@@ -157,7 +175,14 @@ fn probe_emits_valid_snapshot() {
     use ccwatch_core::model::AgentState;
     assert_eq!(s.agents.len(), 3);
     let by_desc = |d: &str| s.agents.iter().find(|a| a.description == d).unwrap();
-    assert!(matches!(by_desc("remote scan").state, AgentState::Running));
+    let scan = by_desc("remote scan");
+    assert!(matches!(scan.state, AgentState::Running));
+    // Sidechain enrichment over ssh: tokens, model, live activity.
+    assert_eq!(scan.tokens.output, 600);
+    assert_eq!(scan.model.as_deref(), Some("claude-haiku-4-5"));
+    assert!(scan.tokens_per_min > 0.0);
+    assert_eq!(scan.activity.len(), 1);
+    assert_eq!(scan.activity[0].detail, "fn main");
     assert!(
         matches!(by_desc("bg still running").state, AgentState::Running),
         "background ack must not finish the agent"
@@ -196,7 +221,11 @@ fn probe_emits_valid_snapshot() {
     // Governor usage buckets: all three messages are within the 6h horizon;
     // billable per message = 100 + out + 50.
     let bucket_sum: u64 = snap.usage_buckets.iter().map(|(_, v)| v).sum();
-    assert_eq!(bucket_sum, 300 + 10_000 + 150, "buckets carry billable tokens");
+    assert_eq!(
+        bucket_sum,
+        300 + 10_000 + 150 + 640,
+        "buckets include the sidechain's billable tokens"
+    );
     assert!(snap.usage_buckets.windows(2).all(|w| w[0].0 < w[1].0), "buckets sorted");
 
     let _ = std::fs::remove_dir_all(&root);

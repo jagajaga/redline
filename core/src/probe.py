@@ -255,6 +255,106 @@ def scan_transcript(path):
     return led, window_billable, last_act, model, list(agents.values()), activity, title
 
 
+def scan_sidechain(path):
+    """One subagent's own transcript → (ledger, window_billable, last_act,
+    model, activity). Tokens also feed the global usage buckets (they drain
+    the same account)."""
+    led = zero_ledger()
+    window_billable = 0
+    last_act = None
+    model = None
+    pending = {}
+    try:
+        fh = open(path, "rb")
+        for raw in fh:
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            ts = parse_ts(d.get("timestamp") or "")
+            if d.get("apiErrorStatus") == 429 and ts and ts >= NOW_MS - HORIZON_MS:
+                RATE_LIMITS.append(ts)
+            m = d.get("message") or {}
+            content = m.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_use":
+                        inp = block.get("input") or {}
+                        detail = ""
+                        for key in ("file_path", "command", "pattern", "query", "url", "description"):
+                            if isinstance(inp.get(key), str):
+                                detail = inp[key][:100]
+                                break
+                        if ts:
+                            pending[block.get("id") or ""] = (block.get("name") or "", detail, ts)
+                    elif block.get("type") == "tool_result":
+                        pending.pop(block.get("tool_use_id"), None)
+            tid = d.get("sourceToolUseID")
+            pending.pop(tid, None)
+            if d.get("type") != "assistant":
+                continue
+            u = m.get("usage") or {}
+            if not u:
+                continue
+            g = lambda k: u.get(k) or 0
+            led["input"] += g("input_tokens")
+            led["output"] += g("output_tokens")
+            led["cache_write"] += g("cache_creation_input_tokens")
+            led["cache_read"] += g("cache_read_input_tokens")
+            led["messages"] += 1
+            if m.get("model") and not m["model"].startswith("<"):
+                model = m["model"]
+            if ts:
+                last_act = max(last_act or 0, ts)
+                billable = (g("input_tokens") + g("output_tokens")
+                            + g("cache_creation_input_tokens"))
+                if ts >= NOW_MS - WINDOW_MS:
+                    window_billable += billable
+                if ts >= NOW_MS - HORIZON_MS:
+                    bucket = ts - (ts % BUCKET_MS)
+                    USAGE_BUCKETS[bucket] = USAGE_BUCKETS.get(bucket, 0) + billable
+        fh.close()
+    except Exception:
+        pass
+    activity = [
+        {"tool": t, "detail": det, "since_ms": ts}
+        for t, det, ts in sorted(pending.values(), key=lambda x: x[2])
+        if NOW_MS - ts < 30 * 60 * 1000
+    ][:4]
+    return led, window_billable, last_act, model, activity
+
+
+def enrich_agents_from_sidechains(sid, transcript_path, agents_list):
+    """Match `<project>/<sid>/subagents/agent-*.jsonl` back to agent entries
+    via meta.json's toolUseId. Returns extra (ledger, window_billable) to roll
+    up into the parent session."""
+    extra_led = zero_ledger()
+    extra_window = 0
+    by_tool_id = {a["id"]: a for a in agents_list}
+    subdir = os.path.join(os.path.dirname(transcript_path), sid, "subagents")
+    for f in glob.glob(os.path.join(subdir, "agent-*.jsonl")):
+        try:
+            meta = json.load(open(f[:-6] + ".meta.json"))
+        except Exception:
+            continue
+        agent = by_tool_id.get(meta.get("toolUseId"))
+        if not agent:
+            continue
+        led, window_billable, last_act, model, activity = scan_sidechain(f)
+        agent["tokens"] = led
+        agent["tokens_per_min"] = window_billable / (WINDOW_MS / 60000.0)
+        agent["activity"] = activity
+        agent["last_activity"] = last_act
+        if model:
+            agent["model"] = model
+        for k in extra_led:
+            extra_led[k] += led[k]
+        extra_window += window_billable
+    return extra_led, extra_window
+
+
 def read_tasks(sid):
     out = []
     files = glob.glob(os.path.join(ROOT, "tasks", sid, "*.json"))
@@ -295,6 +395,15 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
         if sid in transcripts
         else (zero_ledger(), 0, None, None, [], [], None)
     )
+    # Subagent sidechains: enrich agent entries and roll their burn up into
+    # the parent session — it drains the same account.
+    if sid in transcripts and agents:
+        extra_led, extra_window = enrich_agents_from_sidechains(
+            sid, transcripts[sid], agents
+        )
+        for k in led:
+            led[k] += extra_led[k]
+        window_billable += extra_window
     tpm = window_billable / (WINDOW_MS / 60000.0)
     last = last_act or meta.get("startedAt")
     if last is None or NOW_MS - last <= IDLE_MS:
