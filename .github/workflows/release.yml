@@ -18,14 +18,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Tests
         run: cargo test --workspace
-      - name: Build (arm64 + x86_64)
+      - name: Build engine + TUI (arm64 + x86_64)
         run: |
-          cargo build --release --target aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin --bin ccwatch --bin ccwatchd
+          cargo build --release --target x86_64-apple-darwin --bin ccwatch --bin ccwatchd
+      - name: Build the SwiftUI app (universal)
+        run: swift build -c release --package-path app --arch arm64 --arch x86_64
       - name: Universal binaries
         run: |
           mkdir -p dist/ccwatch
-          for bin in ccwatch ccwatchd ccwatch-menubar; do
+          for bin in ccwatch ccwatchd; do
             lipo -create -output "dist/ccwatch/$bin" \
               "target/aarch64-apple-darwin/release/$bin" \
               "target/x86_64-apple-darwin/release/$bin"
@@ -33,41 +35,42 @@ jobs:
           done
           cp README.md dist/ccwatch/
           tar -C dist -czf "ccwatch-${GITHUB_REF_NAME}-macos-universal.tar.gz" ccwatch
-      - name: App bundle (menu bar)
+      - name: App bundle (Redline)
         run: |
-          APP="dist/ccwatch-menubar.app"
+          APP="dist/Redline.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp assets/ccwatch.icns "$APP/Contents/Resources/"
-          # ccwatchd and ccwatch ride along: the app spawns the daemon and
-          # "Open TUI dashboard" from beside its own executable.
-          cp dist/ccwatch/ccwatch-menubar dist/ccwatch/ccwatchd dist/ccwatch/ccwatch "$APP/Contents/MacOS/"
+          # One app: the SwiftUI `redline` owns both the tray and the window.
+          # ccwatchd + ccwatch (TUI) ride along so it can spawn the daemon and
+          # open the TUI from beside its own executable.
+          cp app/.build/apple/Products/Release/Redline "$APP/Contents/MacOS/redline"
+          cp dist/ccwatch/ccwatchd dist/ccwatch/ccwatch "$APP/Contents/MacOS/"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleName</key><string>ccwatch</string>
-              <key>CFBundleDisplayName</key><string>ccwatch</string>
-              <key>CFBundleIdentifier</key><string>com.jagajaga.ccwatch</string>
+              <key>CFBundleName</key><string>Redline</string>
+              <key>CFBundleDisplayName</key><string>Redline</string>
+              <key>CFBundleIdentifier</key><string>com.jagajaga.redline</string>
               <key>CFBundleVersion</key><string>${GITHUB_REF_NAME#v}</string>
               <key>CFBundleShortVersionString</key><string>${GITHUB_REF_NAME#v}</string>
-              <key>CFBundleExecutable</key><string>ccwatch-menubar</string>
+              <key>CFBundleExecutable</key><string>redline</string>
               <key>CFBundleIconFile</key><string>ccwatch</string>
               <key>CFBundlePackageType</key><string>APPL</string>
-              <key>LSMinimumSystemVersion</key><string>11.0</string>
-              <key>LSUIElement</key><true/>
+              <key>LSMinimumSystemVersion</key><string>14.0</string>
               <key>NSHighResolutionCapable</key><true/>
           </dict>
           </plist>
           PLIST
           codesign --force --deep -s - "$APP"
-          ditto -c -k --keepParent "$APP" "ccwatch-menubar-${GITHUB_REF_NAME}-macos.zip"
-          shasum -a 256 ccwatch-*.tar.gz ccwatch-menubar-*.zip > checksums.txt
+          ditto -c -k --keepParent "$APP" "Redline-${GITHUB_REF_NAME}-macos.zip"
+          shasum -a 256 ccwatch-*.tar.gz Redline-*.zip > checksums.txt
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            ccwatch-*.tar.gz ccwatch-menubar-*.zip checksums.txt \
-            --title "ccwatch $GITHUB_REF_NAME" \
+            ccwatch-*.tar.gz Redline-*.zip checksums.txt \
+            --title "Redline $GITHUB_REF_NAME" \
             --generate-notes

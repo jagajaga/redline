@@ -16,3 +16,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace
+      - name: Build the SwiftUI app
+        run: swift build -c release --package-path app

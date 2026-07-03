@@ -246,11 +246,16 @@ pub struct GovernorStatus {
 }
 
 impl GovernorStatus {
-    /// The single number for the menu bar: the plan-window throttle (rate vs
-    /// the pace that lands exactly at the window reset). `None` when no window
-    /// budget is known yet.
+    /// The single number for the menu bar: the throttle of the **binding**
+    /// tank — whichever of the 5h window or weekly limit you're burning
+    /// hardest against (hitting either wall stops you). `None` when no budget
+    /// is known yet.
     pub fn primary_delta(&self) -> Option<f64> {
-        self.window.delta
+        let mut best = self.window.delta;
+        if let Some(d) = self.week.as_ref().and_then(|w| w.delta) {
+            best = Some(best.map_or(d, |b| b.max(d)));
+        }
+        best
     }
 }
 

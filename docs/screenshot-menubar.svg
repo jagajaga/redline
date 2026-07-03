@@ -1,107 +1,68 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 330" font-family="-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif">
-<rect x="0" y="8" width="640" height="30" rx="7" fill="#1d1d1f"/>
-<rect x="434" y="14.0" width="41" height="18" rx="3" fill="#7f7f84" opacity="0.30"/>
-<rect x="437" y="28.0" width="2" height="1.5" fill="rgb(117,170,136)"/>
-<rect x="437" y="29.5" width="2" height="0.5" fill="rgb(117,170,136)" opacity="0.72"/>
-<rect x="440" y="27.0" width="2" height="1.5" fill="rgb(143,168,112)"/>
-<rect x="440" y="28.5" width="2" height="1.5" fill="rgb(143,168,112)" opacity="0.72"/>
-<rect x="443" y="26.0" width="2" height="1.5" fill="rgb(160,167,97)"/>
-<rect x="443" y="27.5" width="2" height="2.5" fill="rgb(160,167,97)" opacity="0.72"/>
-<rect x="446" y="25.0" width="2" height="1.5" fill="rgb(186,165,73)"/>
-<rect x="446" y="26.5" width="2" height="3.5" fill="rgb(186,165,73)" opacity="0.72"/>
-<rect x="449" y="23.0" width="2" height="1.5" fill="rgb(238,160,26)"/>
-<rect x="449" y="24.5" width="2" height="5.5" fill="rgb(238,160,26)" opacity="0.72"/>
-<rect x="452" y="22.0" width="2" height="1.5" fill="rgb(255,148,16)"/>
-<rect x="452" y="23.5" width="2" height="6.5" fill="rgb(255,148,16)" opacity="0.72"/>
-<rect x="455" y="21.0" width="2" height="1.5" fill="rgb(255,125,28)"/>
-<rect x="455" y="22.5" width="2" height="7.5" fill="rgb(255,125,28)" opacity="0.72"/>
-<rect x="458" y="20.0" width="2" height="1.5" fill="rgb(255,103,40)"/>
-<rect x="458" y="21.5" width="2" height="8.5" fill="rgb(255,103,40)" opacity="0.72"/>
-<rect x="461" y="20.0" width="2" height="1.5" fill="rgb(255,114,34)"/>
-<rect x="461" y="21.5" width="2" height="8.5" fill="rgb(255,114,34)" opacity="0.72"/>
-<rect x="464" y="18.0" width="2" height="1.5" fill="rgb(255,80,52)"/>
-<rect x="464" y="19.5" width="2" height="10.5" fill="rgb(255,80,52)" opacity="0.72"/>
-<rect x="467" y="17.0" width="2" height="1.5" fill="rgb(255,69,58)"/>
-<rect x="467" y="18.5" width="2" height="11.5" fill="rgb(255,69,58)" opacity="0.72"/>
-<rect x="470" y="16.0" width="2" height="1.5" fill="rgb(255,69,58)"/>
-<rect x="470" y="17.5" width="2" height="12.5" fill="rgb(255,69,58)" opacity="0.72"/>
-<text x="483" y="28" fill="#f2f2f7" font-size="13" font-variant-numeric="tabular-nums">46k</text>
-<text x="626" y="28" fill="#c7c7cc" font-size="13" text-anchor="end">Mon 21:14</text>
-<rect x="60" y="44" width="300" height="278" rx="10" fill="#ffffff" stroke="#d2d2d7"/>
-<text x="74" y="67.5" fill="#6e6e73" font-size="12">local 2 · demo-host 1 · 46k tok/min · Σ 4.2M · cache 91%</text>
-<text x="74" y="97.5" fill="#6e6e73" font-size="12">throttle ▲1.3× · range 3h39m · tank ~57% · reset 06:10</text>
-<line x1="70" y1="108" x2="350" y2="108" stroke="#e5e5ea"/>
-<text x="74" y="127.5" fill="#d70015" font-size="12.5">⚠ runaway loop — webapp: 62k tok/min · no user turn </text>
-<rect x="65" y="140" width="290" height="26" rx="6" fill="#0a60ff"/>
-<text x="74" y="157.5" font-size="13.5" fill="#ffffff">Fix flaky checkout tests<tspan fill="#d8e5ff" font-size="12">   24k tok/min</tspan></text>
-<text x="348" y="157.5" fill="#d8e5ff" font-size="12" text-anchor="end">›</text>
-<text x="74" y="187.5" font-size="13.5" fill="#1d1d1f">API rate limiter design<tspan fill="#8e8e93" font-size="12">   16k tok/min</tspan></text>
-<text x="348" y="187.5" fill="#8e8e93" font-size="12" text-anchor="end">›</text>
-<text x="74" y="217.5" font-size="13.5" fill="#1d1d1f">Overnight refactor bot<tspan fill="#8e8e93" font-size="12">   8k · demo-host</tspan></text>
-<text x="348" y="217.5" fill="#8e8e93" font-size="12" text-anchor="end">›</text>
-<line x1="70" y1="228" x2="350" y2="228" stroke="#e5e5ea"/>
-<text x="74" y="247.5" fill="#1d1d1f" font-size="13.5">Settings                                              ›</text>
-<line x1="70" y1="258" x2="350" y2="258" stroke="#e5e5ea"/>
-<text x="74" y="277.5" fill="#1d1d1f" font-size="13.5">Open TUI dashboard</text>
-<text x="74" y="307.5" fill="#1d1d1f" font-size="13.5">Quit ccwatch</text>
-<rect x="364" y="138" width="268" height="222" rx="10" fill="#ffffff" stroke="#d2d2d7"/>
-<rect x="376" y="162" width="88" height="1" fill="#8e8e93" opacity="0.4"/>
-<rect x="376.0" y="159.6" width="3.7" height="1.6" fill="rgb(100,172,152)"/>
-<rect x="376.0" y="161.2" width="3.7" height="0.8" fill="rgb(100,172,152)" opacity="0.38"/>
-<rect x="379.7" y="158.8" width="3.7" height="1.6" fill="rgb(117,170,136)"/>
-<rect x="379.7" y="160.4" width="3.7" height="1.6" fill="rgb(117,170,136)" opacity="0.38"/>
-<rect x="383.3" y="159.2" width="3.7" height="1.6" fill="rgb(108,171,144)"/>
-<rect x="383.3" y="160.8" width="3.7" height="1.2" fill="rgb(108,171,144)" opacity="0.38"/>
-<rect x="387.0" y="158.0" width="3.7" height="1.6" fill="rgb(134,169,120)"/>
-<rect x="387.0" y="159.6" width="3.7" height="2.4" fill="rgb(134,169,120)" opacity="0.38"/>
-<rect x="390.7" y="157.2" width="3.7" height="1.6" fill="rgb(152,168,104)"/>
-<rect x="390.7" y="158.8" width="3.7" height="3.2" fill="rgb(152,168,104)" opacity="0.38"/>
-<rect x="394.3" y="157.6" width="3.7" height="1.6" fill="rgb(143,168,112)"/>
-<rect x="394.3" y="159.2" width="3.7" height="2.8" fill="rgb(143,168,112)" opacity="0.38"/>
-<rect x="398.0" y="156.4" width="3.7" height="1.6" fill="rgb(169,166,89)"/>
-<rect x="398.0" y="158.0" width="3.7" height="4.0" fill="rgb(169,166,89)" opacity="0.38"/>
-<rect x="401.7" y="155.2" width="3.7" height="1.6" fill="rgb(195,164,65)"/>
-<rect x="401.7" y="156.8" width="3.7" height="5.2" fill="rgb(195,164,65)" opacity="0.38"/>
-<rect x="405.3" y="156.0" width="3.7" height="1.6" fill="rgb(177,165,81)"/>
-<rect x="405.3" y="157.6" width="3.7" height="4.4" fill="rgb(177,165,81)" opacity="0.38"/>
-<rect x="409.0" y="154.4" width="3.7" height="1.6" fill="rgb(212,163,49)"/>
-<rect x="409.0" y="156.0" width="3.7" height="6.0" fill="rgb(212,163,49)" opacity="0.38"/>
-<rect x="412.7" y="152.8" width="3.7" height="1.6" fill="rgb(246,160,18)"/>
-<rect x="412.7" y="154.4" width="3.7" height="7.6" fill="rgb(246,160,18)" opacity="0.38"/>
-<rect x="416.3" y="153.6" width="3.7" height="1.6" fill="rgb(229,161,34)"/>
-<rect x="416.3" y="155.2" width="3.7" height="6.8" fill="rgb(229,161,34)" opacity="0.38"/>
-<rect x="420.0" y="151.6" width="3.7" height="1.6" fill="rgb(255,148,16)"/>
-<rect x="420.0" y="153.2" width="3.7" height="8.8" fill="rgb(255,148,16)" opacity="0.38"/>
-<rect x="423.7" y="150.0" width="3.7" height="1.6" fill="rgb(255,125,28)"/>
-<rect x="423.7" y="151.6" width="3.7" height="10.4" fill="rgb(255,125,28)" opacity="0.38"/>
-<rect x="427.3" y="150.8" width="3.7" height="1.6" fill="rgb(255,136,22)"/>
-<rect x="427.3" y="152.4" width="3.7" height="9.6" fill="rgb(255,136,22)" opacity="0.38"/>
-<rect x="431.0" y="152.0" width="3.7" height="1.6" fill="rgb(255,153,13)"/>
-<rect x="431.0" y="153.6" width="3.7" height="8.4" fill="rgb(255,153,13)" opacity="0.38"/>
-<rect x="434.7" y="150.4" width="3.7" height="1.6" fill="rgb(255,131,25)"/>
-<rect x="434.7" y="152.0" width="3.7" height="10.0" fill="rgb(255,131,25)" opacity="0.38"/>
-<rect x="438.3" y="148.8" width="3.7" height="1.6" fill="rgb(255,108,37)"/>
-<rect x="438.3" y="150.4" width="3.7" height="11.6" fill="rgb(255,108,37)" opacity="0.38"/>
-<rect x="442.0" y="149.6" width="3.7" height="1.6" fill="rgb(255,120,31)"/>
-<rect x="442.0" y="151.2" width="3.7" height="10.8" fill="rgb(255,120,31)" opacity="0.38"/>
-<rect x="445.7" y="150.8" width="3.7" height="1.6" fill="rgb(255,136,22)"/>
-<rect x="445.7" y="152.4" width="3.7" height="9.6" fill="rgb(255,136,22)" opacity="0.38"/>
-<rect x="449.3" y="151.6" width="3.7" height="1.6" fill="rgb(255,148,16)"/>
-<rect x="449.3" y="153.2" width="3.7" height="8.8" fill="rgb(255,148,16)" opacity="0.38"/>
-<rect x="453.0" y="150.0" width="3.7" height="1.6" fill="rgb(255,125,28)"/>
-<rect x="453.0" y="151.6" width="3.7" height="10.4" fill="rgb(255,125,28)" opacity="0.38"/>
-<rect x="456.7" y="151.2" width="3.7" height="1.6" fill="rgb(255,142,19)"/>
-<rect x="456.7" y="152.8" width="3.7" height="9.2" fill="rgb(255,142,19)" opacity="0.38"/>
-<rect x="460.3" y="152.4" width="3.7" height="1.6" fill="rgb(255,159,10)"/>
-<rect x="460.3" y="154.0" width="3.7" height="8.0" fill="rgb(255,159,10)" opacity="0.38"/>
-<text x="474" y="159" fill="#1d1d1f" font-size="11.5">in 4k · out 8k · cw 2k</text>
-<text x="474" y="171" fill="#8e8e93" font-size="11">cr 180k · 12 msgs</text>
-<line x1="374" y1="184" x2="622" y2="184" stroke="#e5e5ea"/>
-<text x="378" y="204" fill="#8e8e93" font-size="12">running · opus-4-8 · cpu 34% · 420 MB</text>
-<text x="378" y="230" fill="#8e8e93" font-size="12">cwd ~/code/webapp</text>
-<text x="378" y="256" fill="#8e8e93" font-size="12">now · Edit …src/engine.rs · cargo 87% · node 12%</text>
-<line x1="374" y1="274" x2="622" y2="274" stroke="#e5e5ea"/>
-<text x="378" y="294" fill="#1d1d1f" font-size="13">Pause (SIGSTOP)</text>
-<text x="378" y="320" fill="#1d1d1f" font-size="13">Resume (SIGCONT)</text>
-<text x="378" y="346" fill="#d70015" font-size="13">Kill session…</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 512" font-family="-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26262b"/>
+      <stop offset="1" stop-color="#1a1a1e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- menu bar strip -->
+  <rect x="0" y="0" width="400" height="30" fill="#111114"/>
+  <rect x="252" y="7" width="52" height="16" rx="8" fill="#2f2f34"/>
+  <polyline points="258,20 264,17 270,19 276,13 282,15 288,11 294,14 299,12"
+            fill="none" stroke="#30b0c7" stroke-width="1.6" stroke-linejoin="round"/>
+  <text x="310" y="20" fill="#e8e8ea" font-size="12" font-weight="600">&#9660;0.4&#215;</text>
+  <text x="352" y="20" fill="#6a6a6e" font-size="12">&#9834;</text>
+
+  <!-- popover panel -->
+  <g filter="url(#shadow)">
+    <rect x="10" y="42" width="380" height="458" rx="14" fill="url(#panel)" stroke="#ffffff" stroke-opacity="0.08"/>
+  </g>
+
+  <!-- governor header -->
+  <text x="26" y="72" fill="#98989d" font-size="10.5" font-weight="700" letter-spacing="0.6">GOVERNOR &#183; MIX &#183; WEEKLY BINDING</text>
+  <text x="26" y="100" fill="#30b0c7" font-size="24" font-weight="800">&#9660;0.4&#215;</text>
+  <text x="374" y="72" text-anchor="end" fill="#c9c9ce" font-size="12.5">5h&#160;&#160;13%</text>
+  <text x="374" y="90" text-anchor="end" fill="#c9c9ce" font-size="12.5">wk&#160;&#160;32%</text>
+  <text x="26" y="122" fill="#98989d" font-size="12">16 active &#183; 20.9k/min &#183; cache 97%</text>
+  <line x1="10" y1="136" x2="390" y2="136" stroke="#ffffff" stroke-opacity="0.08"/>
+
+  <!-- session card 1 -->
+  <circle cx="30" cy="160" r="4.5" fill="#78cd82"/>
+  <text x="42" y="164" fill="#f2f2f4" font-size="13" font-weight="600">Claude dashboard</text>
+  <text x="374" y="164" text-anchor="end" fill="#98989d" font-size="11.5">20.9k/min</text>
+  <text x="42" y="181" fill="#98989d" font-size="10.5"><tspan fill="#30b0c7">opus</tspan>  &#183;  2.3M tok  &#183;  34% cpu  &#183;  512 MB  &#183;  local</text>
+  <text x="42" y="197" fill="#30b0c7" font-size="10.5">&#9874;  Edit  engine.rs</text>
+  <text x="42" y="213" fill="#98989d" font-size="10.5">3 agents &#183; 2 running</text>
+  <text x="42" y="231" fill="#30b0c7" font-size="10.5">Kill&#160;&#160;&#160;&#160;&#160;Pause&#160;&#160;&#160;&#160;&#160;Resume</text>
+  <line x1="10" y1="245" x2="390" y2="245" stroke="#ffffff" stroke-opacity="0.06"/>
+
+  <!-- session card 2 -->
+  <circle cx="30" cy="269" r="4.5" fill="#ff9f0a"/>
+  <text x="42" y="273" fill="#f2f2f4" font-size="13" font-weight="600">Research AI chat architecture</text>
+  <text x="374" y="273" text-anchor="end" fill="#98989d" font-size="11.5">8.1k/min</text>
+  <text x="42" y="290" fill="#98989d" font-size="10.5"><tspan fill="#b58cff">fable</tspan>  &#183;  980k tok  &#183;  12% cpu  &#183;  310 MB  &#183;  local</text>
+  <text x="42" y="306" fill="#30b0c7" font-size="10.5">&#9874;  Bash  cargo build --release</text>
+  <text x="42" y="322" fill="#98989d" font-size="10.5">1 agent &#183; 1 running</text>
+  <text x="42" y="340" fill="#30b0c7" font-size="10.5">Kill&#160;&#160;&#160;&#160;&#160;Pause&#160;&#160;&#160;&#160;&#160;Resume</text>
+  <line x1="10" y1="354" x2="390" y2="354" stroke="#ffffff" stroke-opacity="0.06"/>
+
+  <!-- session card 3 -->
+  <circle cx="30" cy="378" r="4.5" fill="#78cd82"/>
+  <text x="42" y="382" fill="#f2f2f4" font-size="13" font-weight="600">Blog post benchmarks</text>
+  <text x="374" y="382" text-anchor="end" fill="#98989d" font-size="11.5">3.4k/min</text>
+  <text x="42" y="399" fill="#98989d" font-size="10.5"><tspan fill="#ff9f0a">sonnet</tspan>  &#183;  221k tok  &#183;  6% cpu  &#183;  180 MB  &#183;  local</text>
+  <text x="42" y="415" fill="#98989d" font-size="10.5">2 agents &#183; 1 running</text>
+  <text x="42" y="433" fill="#30b0c7" font-size="10.5">Kill&#160;&#160;&#160;&#160;&#160;Pause&#160;&#160;&#160;&#160;&#160;Resume</text>
+  <line x1="10" y1="452" x2="390" y2="452" stroke="#ffffff" stroke-opacity="0.08"/>
+
+  <!-- footer -->
+  <text x="26" y="479" fill="#c9c9ce" font-size="13">&#9881;  Settings  &#8964;</text>
+  <rect x="236" y="466" width="42" height="22" rx="6" fill="#2f2f34"/>
+  <text x="257" y="481" text-anchor="middle" fill="#e8e8ea" font-size="12.5">TUI</text>
+  <rect x="284" y="466" width="80" height="22" rx="6" fill="#2f2f34"/>
+  <text x="324" y="481" text-anchor="middle" fill="#e8e8ea" font-size="12.5">Dashboard</text>
 </svg>

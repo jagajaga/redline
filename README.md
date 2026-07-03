@@ -1,6 +1,6 @@
-<p align="center"><img src="assets/icon.svg" width="140" alt="ccwatch"></p>
+<p align="center"><img src="assets/icon.svg" width="140" alt="Redline"></p>
 
-<h1 align="center">ccwatch</h1>
+<h1 align="center">Redline</h1>
 
 <p align="center">
 Mission control for Claude Code.<br/>
@@ -8,8 +8,8 @@ Every session, every agent, every token — every machine.
 </p>
 
 <p align="center">
-<a href="https://github.com/jagajaga/ccwatch/actions/workflows/ci.yml"><img src="https://github.com/jagajaga/ccwatch/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
-<a href="https://github.com/jagajaga/ccwatch/releases"><img src="https://img.shields.io/badge/macOS-universal-black" alt="macos"></a>
+<a href="https://github.com/jagajaga/redline/actions/workflows/ci.yml"><img src="https://github.com/jagajaga/redline/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+<a href="https://github.com/jagajaga/redline/releases"><img src="https://img.shields.io/badge/macOS-universal-black" alt="macos"></a>
 </p>
 
 ---
@@ -18,18 +18,30 @@ Claude Code will happily burn your entire 5-hour window while you're at lunch.
 Sessions pile up, agents spawn agents, a server grinds all night — and the
 first you hear is **"limit reached, resets at 03:00."**
 
-ccwatch already knows. It was watching.
+Redline already knows. It was watching.
 
-![ccwatch terminal UI](docs/screenshot-tui.svg)
+![Redline menu bar](docs/screenshot-menubar.svg)
 
-![ccwatch menu bar](docs/screenshot-menubar.svg)
+![Redline dashboard window](docs/screenshot-gui.svg)
+
+![Redline terminal UI](docs/screenshot-tui.svg)
 
 ## Features
 
-- ⛽ **The Governor** — a fuel gauge that **learns your real plan limit from
-  your own 429s** — and re-measures it on every confirmed wall, so plan
-  upgrades *and downgrades* self-correct. `▲2.1×` = hitting the wall 40 min
-  before reset. `▼0.6×` = coast home. Zero config.
+- ⛽ **The Governor** — a fuel gauge that **learns your real plan limits from
+  your own 429s** (both the 5-hour window *and* the weekly cap), re-measuring on
+  every confirmed wall so upgrades *and downgrades* self-correct. It shows the
+  **binding** limit — whichever wall you'll hit first. `▲2.1×` = hitting it 40 min
+  before reset; `▼0.6×` = coast home. Usage is weighted per model so the gauge
+  stays honest across a Fable/Opus/Sonnet mix. Zero config.
+- 🪟 **Redline, the app** — one native **SwiftUI** macOS app (menu bar + window,
+  no Dock icon). The menu-bar icon is a **live burn-rate graph**; click it for a
+  popover with the Governor and a live, per-session list — model, tokens,
+  cpu/ram, current activity, agent counts, and **kill/pause/resume**. The
+  **vibrancy dashboard window** shows the Governor as a ring, both limits side
+  by side, the model mix, and a **click-to-expand, scrollable tree** of every
+  session → agent → task → process. Opens the window by default; flip **Start
+  with menu bar only** to launch tray-only.
 - 🖥 **Fleet view** — all sessions, all machines: burn rate, tokens, cpu/ram,
   last activity, the same titles Claude's UI uses
 - 🔍 **Live activity** — `✎ Edit engine.rs` · `⚙ cargo build 87%` — in-flight
@@ -45,17 +57,20 @@ ccwatch already knows. It was watching.
 
 ## Install
 
-**Menu-bar app** — grab `ccwatch-menubar-*.zip` from the
-[latest release](https://github.com/jagajaga/ccwatch/releases/latest), unzip,
-drop `ccwatch-menubar.app` into `/Applications`, open it. The binaries are
-unsigned, so the first launch needs one of:
+**Redline (the macOS app)** — a native SwiftUI app (menu bar + window),
+macOS 14+. Grab `Redline-*.zip` from the
+[latest release](https://github.com/jagajaga/redline/releases/latest), unzip,
+drop `Redline.app` into `/Applications`, open it. It opens the **dashboard
+window** by default and lives in the **menu bar** — one app, both surfaces.
+Flip **Start with menu bar only** (in the window's footer, or the tray's
+Settings) to launch tray-only. The binary is unsigned, so the first launch
+needs one of:
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/ccwatch-menubar.app
+xattr -dr com.apple.quarantine /Applications/Redline.app
 ```
 
-(or right-click → Open → Open). Then **Settings ▸ Start at login** makes it
-permanent.
+(or right-click → Open → Open).
 
 **Terminal UI** — grab `ccwatch-*-macos-universal.tar.gz` from the same
 release:
@@ -69,7 +84,8 @@ ccwatch
 **From source** (any of it):
 
 ```sh
-cargo build --release && ./target/release/ccwatch
+cargo build --release && ./target/release/ccwatch   # daemon + TUI
+swift build -c release --package-path app            # the macOS app
 ```
 
 No setup. No accounts. No telemetry. The daemon starts itself and exits
@@ -82,10 +98,18 @@ itself when the last window closes.
 | `/` jump anywhere | `d` details | `s` sort | `enter` expand |
 | `k` kill | `p` `r` pause/resume | `f` hide idle | `x` hide done |
 
-Menu bar → **Settings**: pick what sits next to the graph (throttle, burn
-rate, range, tank %, or nothing), hide idle sessions, vanish from the bar
-entirely while nothing is running (it returns by itself), and **start at
-login**.
+Menu-bar icon → a **popover** (its list shows only actively-working sessions).
+The **⚙ Settings** panel has two independent controls: **Limit** — which cap the
+number reflects (**5h window / Weekly / Mix**, where Mix is whichever wall binds
+first) — and **Menu bar shows** — the format next to the graph (**throttle ▲▼×,
+percent, burn rate, or nothing**). Plus **Start with menu bar only** and **Start
+at login**. The footer has **TUI** (opens the terminal UI) and **Dashboard**
+(opens the window).
+
+In the **dashboard window**: click any session to expand its agents, tasks,
+activity, and child processes (click an agent to go deeper); toggle **Hide
+inactive** / **Hide done** in the footer; scroll, resize, or close it like any
+Mac window.
 
 ## Remote machines
 
@@ -102,7 +126,7 @@ becomes an alert — not a silent gap.
 
 Budgets are in **Opus-equivalent tokens** — usage is weighted by model
 (Opus ×1, Fable ×2, Sonnet ×0.6, Haiku ×0.2) so a tank stays honest as the
-model mix shifts. Leave a budget unset and ccwatch learns it from the wall.
+model mix shifts. Leave a budget unset and Redline learns it from the wall.
 
 ```toml
 # ~/.claude/ccwatch/config.toml — all optional
@@ -120,10 +144,10 @@ burn_tokens_per_min = 40000   # where the graph turns red
              ▼                      ▼
           ccwatchd ── tails transcripts (new bytes only), watches pids,
              │        computes rates · alerts · the Governor
-             ├────────────┐   unix socket, JSON snapshots
-             ▼            ▼
-          ccwatch    ccwatch-menubar
+             ├────────────────┐   unix socket, JSON snapshots
+             ▼                ▼
+        ccwatch (TUI)   redline (menu-bar tray + dashboard window)
 ```
 
 Claude Code already writes everything worth knowing into `~/.claude`.
-ccwatch just reads it well. Idle cost: ~0% CPU.
+Redline just reads it well. Idle cost: ~0% CPU.

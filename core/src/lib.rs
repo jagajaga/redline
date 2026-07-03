@@ -6,6 +6,7 @@
 //! or long-running loop lives here — that belongs to the daemon and clients.
 
 pub mod actions;
+pub mod client;
 pub mod collectors;
 pub mod config;
 pub mod engine;

@@ -17,6 +17,12 @@ use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
+/// An agent with no sign of life for this long is treated as finished, even
+/// without an authoritative completion marker — a safety net for agents whose
+/// session crashed or ended before the marker was written. Generous so a
+/// live-but-quiet background agent isn't misreported as done.
+const AGENT_STALE_MS: i64 = 10 * 60_000;
+
 /// One folded assistant message, kept for windowed rate math.
 #[derive(Clone, Copy, Debug)]
 struct TokenEvent {
@@ -51,6 +57,7 @@ impl AgentAccum {
         data: &HashMap<String, AgentData>,
         now_ms: i64,
         rate_window_secs: i64,
+        stale_ms: i64,
     ) -> Agent {
         let d = data.get(&self.id);
         let tokens = d.map(|d| d.ledger).unwrap_or_default();
@@ -81,28 +88,45 @@ impl AgentAccum {
             .unwrap_or_default();
         activity.sort_by_key(|a| a.since_ms);
         activity.truncate(4);
+        let last_act = d.and_then(|d| d.last_activity);
+        let recent = last_act.is_some_and(|la| now_ms - la <= stale_ms)
+            || self.started_at.is_some_and(|s| now_ms - s <= stale_ms);
+        // An agent that is *burning tokens right now* is running — even if a
+        // (sometimes premature) completion marker was seen; the sidechain keeps
+        // generating. Otherwise honor the finish flag, and treat agents with no
+        // recent life as finished (guards against completion markers that never
+        // arrive from crashed/ended sessions leaving phantom "running" agents).
+        let running = tokens_per_min > 0.0 || (!self.finished && recent);
         Agent {
             id: self.id.clone(),
             subagent_type: self.subagent_type.clone(),
             description: self.description.clone(),
             model: d.and_then(|d| d.model.clone()).or_else(|| self.model.clone()),
-            state: if self.finished {
-                AgentState::Finished
-            } else {
+            state: if running {
                 AgentState::Running
+            } else {
+                AgentState::Finished
             },
             started_at: self.started_at,
             tokens,
             tokens_per_min,
             activity,
-            last_activity: d.and_then(|d| d.last_activity),
+            last_activity: last_act,
             children: self
                 .children
                 .iter()
-                .map(|c| c.to_model(data, now_ms, rate_window_secs))
+                .map(|c| c.to_model(data, now_ms, rate_window_secs, stale_ms))
                 .collect(),
         }
     }
+}
+
+/// The `meta.json` beside a subagent sidechain: who launched it and what it is.
+#[derive(Clone)]
+struct SidechainMeta {
+    tool_use_id: String,
+    agent_type: String,
+    description: String,
 }
 
 /// Live data read from one subagent's own sidechain transcript.
@@ -172,6 +196,33 @@ impl SessionAccum {
         self.agents.push(agent);
     }
 
+    /// Ensure an agent exists for a sidechain we're ingesting. Nested subagents
+    /// (spawnDepth ≥ 1, launched from inside a Workflow/agent rather than the
+    /// main transcript) never emit an `AgentStart` we see, so without this their
+    /// burn rolls into the session with no visible agent. Synthesize one from
+    /// its meta.json so live subagent work is always shown.
+    fn ensure_agent(&mut self, id: &str, agent_type: &str, description: &str) {
+        fn exists(agents: &[AgentAccum], id: &str) -> bool {
+            agents.iter().any(|a| a.id == id || exists(&a.children, id))
+        }
+        if exists(&self.agents, id) {
+            return;
+        }
+        self.add_agent(
+            AgentAccum {
+                id: id.to_string(),
+                subagent_type: agent_type.to_string(),
+                description: description.to_string(),
+                model: None,
+                started_at: None,
+                finished: false,
+                background: true,
+                children: Vec::new(),
+            },
+            true,
+        );
+    }
+
     fn prune(&mut self, now_ms: i64, retain_secs: i64) {
         let cutoff = now_ms - retain_secs * 1000;
         while let Some(front) = self.events.front() {
@@ -219,8 +270,8 @@ pub struct Engine {
     last_ended_scan: i64,
     /// Last full process-table scan (epoch ms) — needed for child discovery.
     last_full_scan: i64,
-    /// agent sidechain path -> launching tool_use id (from its meta.json).
-    agent_meta: HashMap<PathBuf, Option<String>>,
+    /// agent sidechain path -> its meta.json (launching tool_use id, type, desc).
+    agent_meta: HashMap<PathBuf, Option<SidechainMeta>>,
     /// Parsed limit-hit markers (session + weekly), pruned to ~2 weeks.
     limit_hits: Vec<crate::model::LimitHit>,
 }
@@ -287,8 +338,16 @@ impl Engine {
         for meta in &metas {
             if let Some(path) = transcript_index.get(&meta.session_id) {
                 self.ingest_transcript(&meta.session_id, path.clone());
-                self.ingest_agent_sidechains(&meta.session_id, path);
             }
+        }
+
+        // Discover every `<project>/<sid>/subagents/` directory across all
+        // project dirs and ingest it. This is independent of which sessions are
+        // "known" — worktree sessions keep their subagents in a different
+        // project dir than their main transcript, and may not be in `metas` at
+        // all — so a global scan is the only way to attribute subagent tokens.
+        for (sid, dir) in self.discover_subagent_dirs() {
+            self.ingest_agent_sidechains(&sid, &dir);
         }
 
         // Also ingest recently-modified transcripts of sessions that no longer
@@ -406,7 +465,7 @@ impl Engine {
             let agents: Vec<Agent> = accum
                 .agents
                 .iter()
-                .map(|a| a.to_model(&accum.agent_data, now_ms, self.config.rate_window_secs))
+                .map(|a| a.to_model(&accum.agent_data, now_ms, self.config.rate_window_secs, AGENT_STALE_MS))
                 .collect();
             let agent_starts_in_window = count_recent_agent_starts(
                 &accum.agents,
@@ -748,6 +807,30 @@ impl Engine {
         }
     }
 
+    /// Find every `<project>/<sid>/subagents/` dir across all project dirs,
+    /// returning `(sid, subagents_dir)`. The session id is the directory name
+    /// that holds `subagents/`, matching the id used everywhere else.
+    fn discover_subagent_dirs(&self) -> Vec<(String, PathBuf)> {
+        let mut out = Vec::new();
+        let Ok(projects) = std::fs::read_dir(self.paths.projects()) else {
+            return out;
+        };
+        for proj in projects.flatten() {
+            let Ok(session_dirs) = std::fs::read_dir(proj.path()) else {
+                continue;
+            };
+            for sd in session_dirs.flatten() {
+                let sub = sd.path().join("subagents");
+                if sub.is_dir() {
+                    if let Some(sid) = sd.path().file_name().and_then(|n| n.to_str()) {
+                        out.push((sid.to_string(), sub));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Map session id → transcript path by scanning `projects/*/`.
     fn index_transcripts(&self) -> HashMap<String, PathBuf> {
         let mut index = HashMap::new();
@@ -774,12 +857,11 @@ impl Engine {
 impl Engine {
     /// Ingest every subagent sidechain of `sid`: tokens roll up into both the
     /// agent's own ledger and the parent session (they drain the same tank).
-    fn ingest_agent_sidechains(&mut self, sid: &str, session_transcript: &std::path::Path) {
-        let dir = match session_transcript.parent() {
-            Some(p) => p.join(sid).join("subagents"),
-            None => return,
-        };
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    /// Ingest one session's `subagents/` directory (`<project>/<sid>/subagents`).
+    /// Called for every such dir discovered across all project dirs, so it works
+    /// for git-worktree sessions whose subagents live apart from the transcript.
+    fn ingest_agent_sidechains(&mut self, sid: &str, dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
@@ -787,25 +869,41 @@ impl Engine {
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            // meta.json (cached) links the file to its launching tool_use.
-            let tool_use_id = self
-                .agent_meta
-                .entry(path.clone())
-                .or_insert_with(|| {
-                    let meta = path.with_extension("meta.json");
-                    std::fs::read_to_string(meta)
+            // meta.json links the file to its launching tool_use and describes
+            // the subagent. Retry while unresolved: the sidechain often appears
+            // a beat before its meta.json is written, and caching that miss
+            // would drop the subagent's tokens forever.
+            let meta = match self.agent_meta.get(&path) {
+                Some(Some(m)) => Some(m.clone()),
+                _ => {
+                    let resolved = std::fs::read_to_string(path.with_extension("meta.json"))
                         .ok()
                         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
                         .and_then(|v| {
-                            v.get("toolUseId")
-                                .and_then(|x| x.as_str())
-                                .map(str::to_string)
-                        })
-                })
-                .clone();
-            let Some(tool_use_id) = tool_use_id else {
+                            let tool_use_id =
+                                v.get("toolUseId").and_then(|x| x.as_str())?.to_string();
+                            Some(SidechainMeta {
+                                tool_use_id,
+                                agent_type: v
+                                    .get("agentType")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("subagent")
+                                    .to_string(),
+                                description: v
+                                    .get("description")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            })
+                        });
+                    self.agent_meta.insert(path.clone(), resolved.clone());
+                    resolved
+                }
+            };
+            let Some(meta) = meta else {
                 continue;
             };
+            let tool_use_id = meta.tool_use_id.clone();
 
             let watermark = *self.watermarks.get(&path).unwrap_or(&0);
             let Some((lines, new_watermark)) = read_new_lines(&path, watermark) else {
@@ -817,6 +915,8 @@ impl Engine {
             }
 
             let accum = self.accums.entry(sid.to_string()).or_default();
+            // Make sure this subagent is visible even if we never saw its launch.
+            accum.ensure_agent(&tool_use_id, &meta.agent_type, &meta.description);
             for line in lines {
                 for ev in transcripts::parse_line(&line) {
                     match ev {
