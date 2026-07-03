@@ -611,6 +611,8 @@ pub(crate) mod test_support {
             rate_limits: Vec::new(),
             limit_hits: Vec::new(),
             model_mix: Vec::new(),
+            weekly_usage_pct: None,
+            window_usage_pct: None,
             governor: None,
         }
     }

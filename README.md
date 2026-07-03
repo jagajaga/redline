@@ -75,9 +75,11 @@ alerts. Run `ccwatch`, or hit **TUI** in the menu-bar popover.
 
 ## The Governor
 
-A fuel gauge that **learns your real plan limits from your own 429s** — both the
-5-hour window *and* the weekly cap — re-measuring on every confirmed wall, so
-upgrades *and* downgrades self-correct. Zero config.
+A fuel gauge for your real plan limits — both the 5-hour window *and* the weekly
+cap. It **anchors to Claude Code's own reported usage** ("*You've used 60% of
+your weekly limit*"), so the gauge matches Claude **exactly**, and falls back to
+learning the ceiling from your own 429 walls when no reading is available.
+Self-correcting, zero config, nothing to calibrate.
 
 A glance looks like this:
 

@@ -281,6 +281,9 @@ pub struct Engine {
     agent_meta: HashMap<PathBuf, Option<SidechainMeta>>,
     /// Parsed limit-hit markers (session + weekly), pruned to ~2 weeks.
     limit_hits: Vec<crate::model::LimitHit>,
+    /// Latest usage-% banners Claude Code printed, per period.
+    weekly_usage: Option<crate::model::UsagePct>,
+    window_usage: Option<crate::model::UsagePct>,
 }
 
 impl Engine {
@@ -297,6 +300,8 @@ impl Engine {
             last_full_scan: -1,
             agent_meta: HashMap::new(),
             limit_hits: Vec::new(),
+            weekly_usage: None,
+            window_usage: None,
         }
     }
 
@@ -609,6 +614,8 @@ impl Engine {
             usage_buckets: bucket_map.into_iter().collect(),
             rate_limits: self.rate_limit_ts(),
             limit_hits: self.limit_hits.clone(),
+            weekly_usage_pct: self.weekly_usage,
+            window_usage_pct: self.window_usage,
             model_mix,
             governor: None,
         }
@@ -789,6 +796,15 @@ impl Engine {
                             let hit = crate::model::LimitHit { weekly, at_ms: ts, reset_ms };
                             if !self.limit_hits.contains(&hit) {
                                 self.limit_hits.push(hit);
+                            }
+                        }
+                    }
+                    TranscriptEvent::UsageReport { pct, weekly, ts_ms } => {
+                        if let Some(ts) = ts_ms {
+                            let slot =
+                                if weekly { &mut self.weekly_usage } else { &mut self.window_usage };
+                            if slot.map(|u| ts >= u.at_ms).unwrap_or(true) {
+                                *slot = Some(crate::model::UsagePct { pct, at_ms: ts });
                             }
                         }
                     }

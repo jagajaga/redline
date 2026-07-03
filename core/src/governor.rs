@@ -177,31 +177,71 @@ pub fn compute(
     now_ms: i64,
     cfg: &Config,
     learned_window_budget: Option<u64>,
+    reported: Option<crate::model::UsagePct>,
 ) -> GovernorStatus {
     let window_ms = cfg.governor_window_hours * 3_600_000;
     let rate_per_min =
         sum_range(buckets, now_ms - RATE_WINDOW_MS, now_ms) as f64 / (RATE_WINDOW_MS as f64 / 60_000.0);
 
-    // Plan window tank.
-    let (w_budget, w_source) = match (cfg.governor_window_budget, learned_window_budget) {
-        (Some(b), _) => (Some(b), BudgetSource::Config),
-        (None, Some(b)) => (Some(b), BudgetSource::Learned),
-        _ => (None, BudgetSource::Unknown),
-    };
-    let window = match window_start(buckets, rate_limits, now_ms, window_ms) {
-        Some(start) => make_tank(
-            sum_range(buckets, start, now_ms),
-            w_budget,
-            w_source,
-            start,
-            Some(start + window_ms),
-            rate_per_min,
-            now_ms,
-        ),
-        None => make_tank(0, w_budget, w_source, now_ms, None, rate_per_min, now_ms),
-    };
+    // Plan window tank. Precedence: Claude's reported % > config > learned.
+    let start_opt = window_start(buckets, rate_limits, now_ms, window_ms);
+    let start = start_opt.unwrap_or(now_ms);
+    let (w_budget, w_source) = pick_budget(
+        budget_from_report(buckets, start, now_ms, reported, window_ms),
+        cfg.governor_window_budget,
+        learned_window_budget,
+    );
+    let used = start_opt.map_or(0, |s| sum_range(buckets, s, now_ms));
+    let window = make_tank(
+        used,
+        w_budget,
+        w_source,
+        start,
+        start_opt.map(|s| s + window_ms),
+        rate_per_min,
+        now_ms,
+    );
 
     GovernorStatus { window, week: None }
+}
+
+/// Pick a tank budget by precedence: reported (Claude's own %) > config >
+/// learned-from-429 > unknown.
+fn pick_budget(
+    reported: Option<u64>,
+    config: Option<u64>,
+    learned: Option<u64>,
+) -> (Option<u64>, BudgetSource) {
+    if let Some(b) = reported {
+        (Some(b), BudgetSource::Reported)
+    } else if let Some(b) = config {
+        (Some(b), BudgetSource::Config)
+    } else if let Some(b) = learned {
+        (Some(b), BudgetSource::Learned)
+    } else {
+        (None, BudgetSource::Unknown)
+    }
+}
+
+/// Derive the true budget from Claude Code's reported usage %: if it said "N%"
+/// at time T, and we measured `used` weighted tokens from the tank start up to
+/// T, the budget is `used / (N/100)`. Ignored if stale or before the tank start.
+fn budget_from_report(
+    buckets: &[(i64, u64)],
+    start: i64,
+    now_ms: i64,
+    report: Option<crate::model::UsagePct>,
+    freshness_ms: i64,
+) -> Option<u64> {
+    let r = report?;
+    if r.pct == 0 || r.at_ms < start || now_ms - r.at_ms > freshness_ms {
+        return None;
+    }
+    let used = sum_range(buckets, start, r.at_ms);
+    if used == 0 {
+        return None;
+    }
+    Some((used as f64 * 100.0 / r.pct as f64).round() as u64)
 }
 
 /// Resolve a "resets …" marker into an epoch. Handles "8pm (Europe/Paris)",
@@ -308,6 +348,7 @@ pub fn weekly_tank(
     hits: &[LimitHit],
     now_ms: i64,
     cfg_budget: Option<u64>,
+    reported: Option<crate::model::UsagePct>,
 ) -> Option<Tank> {
     // Reset anchor: parsed marker, else a rolling 7-day horizon.
     let reset = weekly_reset_after(hits, now_ms);
@@ -316,11 +357,12 @@ pub fn weekly_tank(
         None => (now_ms - WEEK_MS, None),
     };
     let used = sum_range(buckets, start, now_ms);
-    let (budget, source) = match (cfg_budget, learn_weekly(buckets, hits, true).map(|(b, _)| b)) {
-        (Some(b), _) => (Some(b), BudgetSource::Config),
-        (None, Some(b)) => (Some(b), BudgetSource::Learned),
-        _ => (None, BudgetSource::Unknown),
-    };
+    // Precedence: Claude's reported % > config > learned-from-429.
+    let (budget, source) = pick_budget(
+        budget_from_report(buckets, start, now_ms, reported, WEEK_MS),
+        cfg_budget,
+        learn_weekly(buckets, hits, true).map(|(b, _)| b),
+    );
     // Nothing to show if there's neither usage nor a budget nor a reset.
     if used == 0 && budget.is_none() && resets_at.is_none() {
         return None;
@@ -527,7 +569,7 @@ mod tests {
         // Used counts only post-resume burn.
         let mut c = cfg();
         c.governor_window_budget = None;
-        let g = compute(&b, &rl, NOW, &c, None);
+        let g = compute(&b, &rl, NOW, &c, None, None);
         assert_eq!(g.window.used, 170_000);
         // Reset = resume + 5h.
         assert_eq!(g.window.resets_at, Some(bucket_of(NOW - 85 * 60_000) + 5 * H));
@@ -544,7 +586,7 @@ mod tests {
         // Old window: activity 7h ago (window expired 2h ago). Current window
         // anchors at 80m ago; the 30m-ago burn is inside it too.
         let b = buckets(&[(420, 100_000), (80, 200_000), (30, 300_000)]);
-        let g = compute(&b, &[], NOW, &cfg(), None);
+        let g = compute(&b, &[], NOW, &cfg(), None, None);
         assert_eq!(g.window.used, 500_000, "old-window usage must not count");
         assert_eq!(g.window.budget, Some(1_000_000));
         assert_eq!(
@@ -559,7 +601,7 @@ mod tests {
         // Window anchored 2h ago → resets 3h from now. Used 500k of 1M.
         // Recent burn: 50k in the last 5 min → 10k/min.
         let b = buckets(&[(120, 450_000), (2, 50_000)]);
-        let g = compute(&b, &[], NOW, &cfg(), None);
+        let g = compute(&b, &[], NOW, &cfg(), None, None);
         let w = &g.window;
         assert_eq!(w.used, 500_000);
         assert!((w.rate_per_min - 10_000.0).abs() < 1.0);
@@ -578,7 +620,7 @@ mod tests {
     fn no_wall_when_coasting() {
         // Burning slower than cruise → no wall, delta < 1.
         let b = buckets(&[(120, 100_000), (2, 5_000)]);
-        let g = compute(&b, &[], NOW, &cfg(), None);
+        let g = compute(&b, &[], NOW, &cfg(), None, None);
         assert!(g.window.delta.unwrap() < 1.0);
         assert!(g.window.wall_at.is_none());
         assert!(wall_alert(&g, NOW).is_none());
@@ -597,7 +639,7 @@ mod tests {
         // Learned feeds the tank when config has no budget.
         let mut c = cfg();
         c.governor_window_budget = None;
-        let g = compute(&b, &rl, NOW, &c, Some(learned.tokens));
+        let g = compute(&b, &rl, NOW, &c, Some(learned.tokens), None);
         assert_eq!(g.window.budget, Some(500_000));
         assert_eq!(g.window.budget_source, BudgetSource::Learned);
     }
@@ -641,7 +683,7 @@ mod tests {
         let mut c = cfg();
         c.governor_window_budget = Some(100); // tiny budget, long overshot
         let b = buckets(&[(60, 500_000), (2, 50_000)]);
-        let g = compute(&b, &[], NOW, &c, None);
+        let g = compute(&b, &[], NOW, &c, None, None);
         assert!(g.window.delta.unwrap() >= DELTA_EMPTY);
         assert_eq!(g.window.range_min, Some(0.0));
     }
@@ -681,7 +723,7 @@ mod tests {
             (4 * 24 * 60, 200_000_000),
             (24 * 60, 60_000_000),
         ]);
-        let t = weekly_tank(&b, &hits, NOW, None).unwrap();
+        let t = weekly_tank(&b, &hits, NOW, None, None).unwrap();
         assert_eq!(t.budget, Some(400_000_000));
         assert_eq!(t.budget_source, BudgetSource::Learned);
         assert_eq!(t.resets_at, Some(reset));
@@ -689,7 +731,7 @@ mod tests {
         assert!(t.used > 0);
 
         // Config overrides the learned value.
-        let t2 = weekly_tank(&b, &hits, NOW, Some(999_000_000)).unwrap();
+        let t2 = weekly_tank(&b, &hits, NOW, Some(999_000_000), None).unwrap();
         assert_eq!(t2.budget, Some(999_000_000));
         assert_eq!(t2.budget_source, BudgetSource::Config);
     }

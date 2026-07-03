@@ -197,6 +197,9 @@ pub fn fetch_remote(
 /// Merge a local snapshot with zero or more remote snapshots into one aggregate,
 /// recomputing totals across every host.
 pub fn merge(local: Snapshot, remotes: &[Snapshot]) -> Snapshot {
+    // Capture Copy fields before `local` is partially moved below.
+    let local_weekly = local.weekly_usage_pct;
+    let local_window = local.window_usage_pct;
     let mut sessions = local.sessions;
     let mut alerts = local.alerts;
     for r in remotes {
@@ -260,6 +263,16 @@ pub fn merge(local: Snapshot, remotes: &[Snapshot]) -> Snapshot {
     }
     let model_mix = mix.into_iter().collect();
 
+    // Usage % is account-wide — keep the freshest reading across every host.
+    let weekly_usage_pct = std::iter::once(local_weekly)
+        .chain(remotes.iter().map(|r| r.weekly_usage_pct))
+        .flatten()
+        .max_by_key(|u| u.at_ms);
+    let window_usage_pct = std::iter::once(local_window)
+        .chain(remotes.iter().map(|r| r.window_usage_pct))
+        .flatten()
+        .max_by_key(|u| u.at_ms);
+
     Snapshot {
         generated_at: local.generated_at,
         sessions,
@@ -269,6 +282,8 @@ pub fn merge(local: Snapshot, remotes: &[Snapshot]) -> Snapshot {
         rate_limits,
         limit_hits,
         model_mix,
+        weekly_usage_pct,
+        window_usage_pct,
         governor: None,
     }
 }

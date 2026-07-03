@@ -201,6 +201,8 @@ impl AlertKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetSource {
+    /// Anchored to Claude Code's own reported usage % — exact, zero-config.
+    Reported,
     /// Set by the user in config.
     Config,
     /// Learned from observed 429 rate-limit events (an estimate).
@@ -377,9 +379,23 @@ pub struct Snapshot {
     /// weights. Merged (summed per tier) across every host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_mix: Vec<(String, u64)>,
+    /// Latest live usage-% banners Claude Code printed ("used 60% of your
+    /// weekly limit"). Authoritative — the daemon anchors the tank budget to
+    /// these so the gauge matches Claude exactly. Internal (not sent to clients).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_usage_pct: Option<UsagePct>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_usage_pct: Option<UsagePct>,
     /// Fuel-gauge readouts; computed by the daemon after merging all hosts.
     #[serde(default)]
     pub governor: Option<GovernorStatus>,
+}
+
+/// A live usage-% reading straight from Claude Code's banner.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct UsagePct {
+    pub pct: u8,
+    pub at_ms: i64,
 }
 
 /// A parsed limit-hit marker: Claude Code told the user it hit a wall and when
@@ -405,6 +421,8 @@ impl Snapshot {
             rate_limits: Vec::new(),
             limit_hits: Vec::new(),
             model_mix: Vec::new(),
+            weekly_usage_pct: None,
+            window_usage_pct: None,
             governor: None,
         }
     }

@@ -57,6 +57,14 @@ pub enum TranscriptEvent {
         reset_text: String,
         ts_ms: Option<i64>,
     },
+    /// Claude Code's live usage banner: "You've used 60% of your weekly limit ·
+    /// resets in 4d". The authoritative percentage straight from the source —
+    /// used to anchor the tank budget so the gauge matches Claude exactly.
+    UsageReport {
+        pct: u8,
+        weekly: bool,
+        ts_ms: Option<i64>,
+    },
     /// A human-readable session title ("ai-title" / "custom-title" lines).
     Title { text: String, custom: bool },
     /// Any other tool call starting — in-flight until its tool_result arrives.
@@ -121,6 +129,12 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
                 });
             }
         }
+    }
+
+    // Live usage banner: "used 60% of your weekly limit · resets in 4d". Scan
+    // the raw line (it can live inside a system-reminder, not just message text).
+    if let Some((pct, weekly)) = parse_usage_pct(line) {
+        out.push(TranscriptEvent::UsageReport { pct, weekly, ts_ms });
     }
 
     // Background-task completions arrive as task-notification blocks carrying
@@ -331,6 +345,38 @@ fn parse_ts(s: &str) -> Option<i64> {
         .map(|dt| dt.timestamp_millis())
 }
 
+/// Parse "used 60% of your weekly limit" / "... session limit" / "... 5-hour
+/// limit" → (percent, is_weekly). Anchored on "% of your " so it doesn't match
+/// unrelated percentages.
+fn parse_usage_pct(s: &str) -> Option<(u8, bool)> {
+    let key = "% of your ";
+    let idx = s.find(key)?;
+    // The number immediately before '%'.
+    let digits: String = s[..idx]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let pct: u8 = digits.parse().ok()?;
+    if pct == 0 || pct > 100 {
+        return None;
+    }
+    let after = &s[idx + key.len()..];
+    if after.starts_with("weekly limit") {
+        Some((pct, true))
+    } else if after.starts_with("session limit")
+        || after.starts_with("5-hour limit")
+        || after.starts_with("5 hour limit")
+    {
+        Some((pct, false))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +525,17 @@ mod tests {
         assert!(!parse_line(line)
             .iter()
             .any(|e| matches!(e, TranscriptEvent::RateLimited { .. })));
+    }
+}
+
+#[cfg(test)]
+mod usage_pct_tests {
+    use super::*;
+    #[test]
+    fn parses_the_real_banner() {
+        let line = r#"{"type":"user","timestamp":"2026-07-03T20:07:33.943Z","message":{"role":"user","content":"<system-reminder>You've used 60% of your weekly limit · resets in 4d</system-reminder>"}}"#;
+        assert_eq!(parse_usage_pct(line), Some((60, true)));
+        let evs = parse_line(line);
+        assert!(evs.iter().any(|e| matches!(e, TranscriptEvent::UsageReport { pct: 60, weekly: true, .. })));
     }
 }

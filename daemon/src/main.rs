@@ -167,17 +167,19 @@ fn main() -> anyhow::Result<()> {
                 snap.generated_at,
                 &config,
                 learned.map(|l| l.tokens),
+                snap.window_usage_pct,
             );
             if let Some(alert) = ccwatch_core::governor::wall_alert(&g, snap.generated_at) {
                 snap.alerts.push(alert);
             }
-            // Weekly tank: one account-wide 7-day limit, from limit markers +
-            // weighted buckets.
+            // Weekly tank: one account-wide 7-day limit, anchored to Claude's
+            // reported % when present, else limit markers + weighted buckets.
             g.week = ccwatch_core::governor::weekly_tank(
                 &snap.usage_buckets,
                 &snap.limit_hits,
                 snap.generated_at,
                 config.governor_week_budget,
+                snap.weekly_usage_pct,
             );
             if let Some(alert) =
                 ccwatch_core::governor::weekly_wall_alert(&g, snap.generated_at)
