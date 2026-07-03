@@ -4,7 +4,7 @@ import Darwin
 /// Talks to ccwatchd over the Unix socket: spawns it if needed, subscribes,
 /// and streams decoded `Snapshot`s. Networking runs on a background thread;
 /// callbacks are delivered on the main queue.
-final class DaemonClient {
+final class DaemonClient: @unchecked Sendable {
     var onSnapshot: ((Snapshot) -> Void)?
     var onConnection: ((Bool) -> Void)?
 
@@ -178,13 +178,15 @@ final class Store: ObservableObject {
         client.start()
     }
 
-    func killSession(pid: Int) {
+    // Fire-and-forget forwarders — no main-actor state touched, so they're
+    // callable straight from SwiftUI button actions on any Swift toolchain.
+    nonisolated func killSession(pid: Int) {
         client.sendAction(["msg": "action", "action": "kill_session", "pid": pid])
     }
-    func pauseSession(pid: Int) {
+    nonisolated func pauseSession(pid: Int) {
         client.sendAction(["msg": "action", "action": "pause_session", "pid": pid])
     }
-    func resumeSession(pid: Int) {
+    nonisolated func resumeSession(pid: Int) {
         client.sendAction(["msg": "action", "action": "resume_session", "pid": pid])
     }
 }

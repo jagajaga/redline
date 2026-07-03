@@ -20,6 +20,9 @@ struct DashboardView: View {
         if let snap = store.snap {
             VStack(spacing: 0) {
                 header(snap)
+                if !snap.alerts.isEmpty {
+                    AlertsBanner(alerts: snap.alerts)
+                }
                 Divider().opacity(0.4)
                 SessionTree(snap: snap, store: store,
                             hideDone: hideDone, hideInactive: hideInactive)
@@ -224,6 +227,32 @@ struct MixBar: View {
             }
         }
         .cardStyle()
+    }
+}
+
+// MARK: - Alerts
+
+struct AlertsBanner: View {
+    let alerts: [Alert]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(alerts) { a in
+                HStack(spacing: 8) {
+                    Image(systemName: a.severity == "critical" ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(a.severity == "critical" ? Palette.red : Palette.orange)
+                        .font(.caption)
+                    Text(a.subject).fontWeight(.medium)
+                    Text(a.message).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    Text(Fmt.ago(a.sinceMs)).foregroundStyle(.tertiary)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(.horizontal, 20).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.orange.opacity(0.08))
     }
 }
 

@@ -13,7 +13,7 @@ struct TrayLabel: View {
         let show = MenuShow(rawValue: showRaw) ?? .throttle
         let tank = g.map { Gov.selected($0, mode).tank }
         HStack(spacing: 3) {
-            Image(nsImage: BurnGraph.image(store.burnHistory))
+            Image(nsImage: BurnGraph.image(store.burnHistory, heat: Gov.heat(tank?.delta)))
             if let tank, let txt = Gov.trayText(tank, show) {
                 Text(txt)
             }
@@ -83,6 +83,12 @@ struct MenuContent: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                 paceLine(g, snap.generatedAt)
             }
+            ForEach(snap.alerts.prefix(3)) { a in
+                Text("⚠ \(a.subject): \(a.message)")
+                    .font(.caption2)
+                    .foregroundStyle(a.severity == "critical" ? Palette.red : Palette.orange)
+                    .lineLimit(1)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -104,9 +110,11 @@ struct MenuContent: View {
         case .window: return proj(g.window, "5h")
         case .week: return proj(g.week, "weekly")
         case .mix:
-            // The one that runs out soonest — the real constraint.
-            let cs = [proj(g.window, "5h"), proj(g.week, "weekly")].compactMap { $0 }
-            return cs.min(by: { $0.1 < $1.1 })
+            // The binding limit — same one the hero throttle shows: whichever
+            // you'll hit its wall first (highest delta). This is the limit that
+            // runs out *before its own reset*, not merely the soonest clock time.
+            let b = Gov.binding(g)
+            return proj(b.tank, b.isWeek ? "weekly" : "5h")
         }
     }
 

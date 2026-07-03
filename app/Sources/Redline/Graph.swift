@@ -1,12 +1,13 @@
 import AppKit
 import SwiftUI
 
-/// Renders the live burn-rate sparkline used as the menu-bar icon. Each segment
-/// is colored by *its own* value along the teal→orange→red heat ramp, so the
-/// graph reads as a gradient of intensity over time. Returns a colored
-/// (non-template) NSImage so it shows in color in the status bar.
+/// Renders the live burn-rate sparkline used as the menu-bar icon. Color is
+/// tied to the number next to it: the graph's peak takes the current throttle
+/// color (`heat`), and lower points grade cooler — so a red ▲2.7× makes a red
+/// graph, a coasting ▼ makes a teal one, while the shape still shows the burn.
+/// Returns a colored (non-template) NSImage so it shows in color in the bar.
 enum BurnGraph {
-    static func image(_ samples: [Double], width: CGFloat = 34, height: CGFloat = 16) -> NSImage {
+    static func image(_ samples: [Double], heat: Double, width: CGFloat = 34, height: CGFloat = 16) -> NSImage {
         let img = NSImage(size: NSSize(width: width, height: height))
         img.lockFocus()
         defer {
@@ -34,8 +35,11 @@ enum BurnGraph {
             CGPoint(x: pad + w * CGFloat(i) / CGFloat(n - 1),
                     y: pad + h * CGFloat(samples[i] / maxV))
         }
-        // Each point's value → its own color on the heat ramp.
-        func color(_ i: Int) -> NSColor { NSColor(Gov.heatColor(samples[i] / maxV)) }
+        // Point color = throttle heat scaled by the point's relative height, so
+        // the peak matches the number's color and quieter moments read cooler.
+        func color(_ i: Int) -> NSColor {
+            NSColor(Gov.heatColor(max(0, heat) * samples[i] / maxV))
+        }
 
         // Draw each segment with the color of its (right-hand) value: a filled
         // area quad plus the line on top.
