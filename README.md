@@ -79,9 +79,23 @@ A fuel gauge that **learns your real plan limits from your own 429s** — both t
 5-hour window *and* the weekly cap — re-measuring on every confirmed wall, so
 upgrades *and* downgrades self-correct. Zero config.
 
-- It shows the **binding** limit — whichever wall you'll hit first. `▲2.1×`
-  means you're burning at 2.1× the pace that coasts you to reset (you'll hit it
-  early); `▼0.4×` means you'll coast home with room to spare.
+A glance looks like this:
+
+```
+5h 40% · weekly 54% · 16 active · 8.1k tok/min · ▲1.9× (weekly binding)
+```
+
+The number that matters is the **throttle**. The rule is dead simple:
+
+- `▼0.4×` — **you're good**, you'll coast to the reset. Push more if you want.
+- `▲1.9×` — you're burning fast enough to **hit the wall early** — ease off, or
+  switch to a cheaper model / fewer agents.
+
+- It always shows the **binding** limit — whichever wall you'll hit first (`▲2.1×`
+  = 2.1× the pace that coasts you to reset).
+- It **projects when** you'll hit that wall at the current pace — *"weekly tokens
+  gone: Wed 14:00"* — so you can decide which models to use and how many agents
+  to run *before* you get surprised mid-task.
 - Usage is metered in **Opus-equivalent tokens**, weighted per model, so the
   gauge stays honest across a Fable/Opus/Sonnet mix.
 - Limit math counts **billable** tokens (input + output + cache-creation —
