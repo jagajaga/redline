@@ -12,9 +12,8 @@ struct TrayLabel: View {
         let mode = LimitMode(rawValue: limitRaw) ?? .mix
         let show = MenuShow(rawValue: showRaw) ?? .throttle
         let tank = g.map { Gov.selected($0, mode).tank }
-        let heat = Gov.heat(tank?.delta)
         HStack(spacing: 3) {
-            Image(nsImage: BurnGraph.image(store.burnHistory, color: Gov.heatColor(heat)))
+            Image(nsImage: BurnGraph.image(store.burnHistory))
             if let tank, let txt = Gov.trayText(tank, show) {
                 Text(txt)
             }

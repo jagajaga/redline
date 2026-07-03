@@ -27,7 +27,12 @@ const AGENT_STALE_MS: i64 = 10 * 60_000;
 #[derive(Clone, Copy, Debug)]
 struct TokenEvent {
     ts_ms: i64,
+    /// Billable tokens (input + output + cache-creation) — drives the Governor
+    /// and everything that projects rate-limit consumption.
     total: u64,
+    /// "Work" tokens (input + output only) — the displayed session/agent burn
+    /// rate, which stays intuitive instead of being dominated by cache churn.
+    work: u64,
     input: u64,
     cache_read: u64,
     /// The model tier of *this* message (not the session's latest), so the
@@ -68,7 +73,7 @@ impl AgentAccum {
                     .events
                     .iter()
                     .filter(|e| e.ts_ms >= cutoff)
-                    .map(|e| e.total)
+                    .map(|e| e.work)
                     .sum();
                 sum as f64 / (rate_window_secs as f64 / 60.0)
             })
@@ -243,18 +248,20 @@ impl SessionAccum {
         }
     }
 
-    /// Sum of `total` tokens within the window ending at `now_ms`.
+    /// Windowed sums ending at `now_ms`: (work, input, cache_read). The
+    /// displayed burn rate uses `work` (input+output); the Governor sums
+    /// billable `total` separately from its own buckets.
     fn window_sum(&self, now_ms: i64, window_secs: i64) -> (u64, u64, u64) {
         let cutoff = now_ms - window_secs * 1000;
-        let mut total = 0u64;
+        let mut work = 0u64;
         let mut input = 0u64;
         let mut cache_read = 0u64;
         for e in self.events.iter().filter(|e| e.ts_ms >= cutoff) {
-            total += e.total;
+            work += e.work;
             input += e.input;
             cache_read += e.cache_read;
         }
-        (total, input, cache_read)
+        (work, input, cache_read)
     }
 }
 
@@ -405,11 +412,11 @@ impl Engine {
             let accum = self.accums.get_mut(&session_id).unwrap();
             accum.prune(now_ms, self.config.retention_secs());
 
-            let (win_total, win_input, win_cache_read) =
+            let (win_work, win_input, win_cache_read) =
                 accum.window_sum(now_ms, self.config.rate_window_secs);
             let window_min = self.config.rate_window_secs as f64 / 60.0;
             let tokens_per_min = if window_min > 0.0 {
-                win_total as f64 / window_min
+                win_work as f64 / window_min
             } else {
                 0.0
             };
@@ -713,10 +720,8 @@ impl Engine {
                             let tier = crate::config::tier_of(accum.model.as_deref());
                             accum.events.push_back(TokenEvent {
                                 ts_ms: ts,
-                                // Burn rate tracks billable tokens, not cheap
-                                // cache reads (those go in `cache_read` for the
-                                // bleed heuristic).
                                 total: usage.billable(),
+                                work: usage.input + usage.output,
                                 input: usage.input,
                                 cache_read: usage.cache_read,
                                 tier,
@@ -935,6 +940,7 @@ impl Engine {
                                 let te = TokenEvent {
                                     ts_ms: ts,
                                     total: usage.billable(),
+                                    work: usage.input + usage.output,
                                     input: usage.input,
                                     cache_read: usage.cache_read,
                                     tier,
