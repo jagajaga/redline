@@ -140,6 +140,11 @@ final class DaemonClient: @unchecked Sendable {
             }
         }
         if res != 0 { close(fd); return -1 }
+        // Receive timeout so a stalled/half-open connection can never wedge the
+        // read loop forever — the daemon heartbeats every ~1s, so a healthy
+        // connection never trips this; a dead one forces a reconnect within 25s.
+        var tv = timeval(tv_sec: 25, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         return fd
     }
 
