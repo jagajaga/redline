@@ -98,6 +98,13 @@ jobs:
           PY
           bash extension/pack.sh dist-ext
           cp dist-ext/redline-usage-bridge-* . 2>/dev/null || true
+      - name: Stable-named download aliases
+        run: |
+          # Version-stable filenames so the website can deep-link to
+          # /releases/latest/download/<name> without breaking every release.
+          for f in Redline-*.dmg; do cp "$f" Redline.dmg; done
+          for f in redline-usage-bridge-chrome-*.zip; do cp "$f" redline-usage-bridge-chrome.zip; done
+          for f in redline-usage-bridge-firefox-*.xpi; do [ -e "$f" ] && cp "$f" redline-usage-bridge-firefox.xpi; done
       - name: Checksums
         run: |
           shasum -a 256 ccwatch-*.tar.gz Redline-*.zip Redline-*.dmg \
@@ -108,7 +115,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            ccwatch-*.tar.gz Redline-*.dmg Redline-*.zip \
+            ccwatch-*.tar.gz Redline.dmg Redline-*.dmg Redline-*.zip \
             redline-usage-bridge-* checksums.txt \
             --title "Redline $GITHUB_REF_NAME" \
             --generate-notes
