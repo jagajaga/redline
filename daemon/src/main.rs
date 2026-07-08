@@ -8,6 +8,7 @@
 //! scripting and verification.
 
 mod remotes;
+mod usage_bridge;
 
 use ccwatch_core::actions::{self, ActionOutcome};
 use ccwatch_core::ipc::{ActionRequest, ClientMsg, ServerMsg};
@@ -118,6 +119,14 @@ fn main() -> anyhow::Result<()> {
     // Refresher thread owns the engine and merges cached remote snapshots.
     // Failing remotes surface as RemoteDown alerts rather than vanishing, and
     // the Governor (fuel gauge) is computed over the merged account-wide usage.
+    // Live plan-usage from the browser "Usage Bridge" extension (exact session +
+    // weekly %, past Cloudflare). Ground truth for the Governor when present.
+    let live_usage = usage_bridge::spawn(paths.ccwatch_dir(), || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    });
     {
         let shared = shared.clone();
         let config = Config::load(&paths.config_file());
@@ -126,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         let remote_errors = manager.errors();
         let learned_path = paths.ccwatch_dir().join("learned.json");
         let mut learned = load_learned(&learned_path);
+        let live_usage = live_usage.clone();
         let mut build = move |engine: &mut Engine| {
             let local = engine.refresh_now();
             let remotes = remote_cache.read().unwrap().clone();
@@ -161,13 +171,15 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+            // Live extension reading wins over the (sporadic) transcript banner.
+            let live = live_usage.read().ok().map(|u| *u).unwrap_or_default();
             let mut g = ccwatch_core::governor::compute(
                 &snap.usage_buckets,
                 &snap.rate_limits,
                 snap.generated_at,
                 &config,
                 learned.map(|l| l.tokens),
-                snap.window_usage_pct,
+                live.session.or(snap.window_usage_pct),
             );
             if let Some(alert) = ccwatch_core::governor::wall_alert(&g, snap.generated_at) {
                 snap.alerts.push(alert);
@@ -179,7 +191,7 @@ fn main() -> anyhow::Result<()> {
                 &snap.limit_hits,
                 snap.generated_at,
                 config.governor_week_budget,
-                snap.weekly_usage_pct,
+                live.weekly.or(snap.weekly_usage_pct),
             );
             if let Some(alert) =
                 ccwatch_core::governor::weekly_wall_alert(&g, snap.generated_at)
