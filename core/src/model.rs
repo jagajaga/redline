@@ -248,16 +248,47 @@ pub struct GovernorStatus {
 }
 
 impl GovernorStatus {
-    /// The single number for the menu bar: the throttle of the **binding**
-    /// tank — whichever of the 5h window or weekly limit you're burning
-    /// hardest against (hitting either wall stops you). `None` when no budget
-    /// is known yet.
-    pub fn primary_delta(&self) -> Option<f64> {
-        let mut best = self.window.delta;
-        if let Some(d) = self.week.as_ref().and_then(|w| w.delta) {
-            best = Some(best.map_or(d, |b| b.max(d)));
+    /// The **binding** tank and whether it's the weekly one: the wall you'll hit
+    /// *first*. A tank with `wall_at` set will run dry before it resets, so the
+    /// one with the **earliest** `wall_at` binds — a nearly-full 5h window (wall
+    /// minutes away) beats a high-ratio-but-days-away weekly. Only if neither
+    /// tank hits a wall before its reset do we fall back to the larger throttle.
+    ///
+    /// This is *not* max-delta: because the weekly budget is spread over ~7 days
+    /// its sustainable pace is low, so its delta is almost always the larger of
+    /// the two — max-delta would make "Mix" resolve to weekly nearly always,
+    /// even when the 5h window is about to stop you.
+    pub fn binding(&self) -> (&Tank, bool) {
+        let w = &self.window;
+        let Some(wk) = self.week.as_ref() else {
+            return (w, false);
+        };
+        match (w.wall_at, wk.wall_at) {
+            (Some(a), Some(b)) => {
+                if b < a {
+                    (wk, true)
+                } else {
+                    (w, false)
+                }
+            }
+            (Some(_), None) => (w, false),
+            (None, Some(_)) => (wk, true),
+            (None, None) => {
+                let wd = w.delta.unwrap_or(0.0);
+                let kd = wk.delta.unwrap_or(0.0);
+                if kd > wd {
+                    (wk, true)
+                } else {
+                    (w, false)
+                }
+            }
         }
-        best
+    }
+
+    /// The single number for the menu bar / TUI: the throttle of the binding
+    /// tank (the wall you'll hit first). `None` when no budget is known yet.
+    pub fn primary_delta(&self) -> Option<f64> {
+        self.binding().0.delta
     }
 }
 
@@ -425,5 +456,63 @@ impl Snapshot {
             window_usage_pct: None,
             governor: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tank(delta: f64, wall_at: Option<i64>) -> Tank {
+        Tank {
+            used: 0,
+            budget: Some(1_000_000),
+            budget_source: BudgetSource::Reported,
+            window_start: 0,
+            resets_at: Some(10_000_000),
+            rate_per_min: 100.0,
+            cruise_per_min: Some(50.0),
+            delta: Some(delta),
+            range_min: wall_at.map(|w| (w / 60_000) as f64),
+            wall_at,
+        }
+    }
+
+    #[test]
+    fn binding_is_soonest_wall_not_biggest_delta() {
+        // 5h window nearly empty: wall 2 min away, delta 6.5.
+        // Weekly barely used: wall ~13h away, delta 12.7 (bigger ratio because
+        // its budget is spread over ~7 days). The wall you hit FIRST is the 5h,
+        // so Mix must bind to the window — not weekly.
+        let now = 1_000_000_000_000i64;
+        let g = GovernorStatus {
+            window: tank(6.5, Some(now + 2 * 60_000)),
+            week: Some(tank(12.7, Some(now + 769 * 60_000))),
+        };
+        let (_, is_week) = g.binding();
+        assert!(!is_week, "binding should be the 5h window (soonest wall), got weekly");
+        assert_eq!(g.primary_delta(), Some(6.5));
+    }
+
+    #[test]
+    fn binding_falls_back_to_larger_delta_when_neither_hits_a_wall() {
+        // Both coasting (no wall before reset) → the one under more pressure.
+        let g = GovernorStatus {
+            window: tank(0.4, None),
+            week: Some(tank(0.7, None)),
+        };
+        assert!(g.binding().1, "coasting: larger-delta weekly should bind");
+    }
+
+    #[test]
+    fn binding_prefers_the_tank_that_will_wall_over_a_coasting_one() {
+        // Weekly will hit its wall; 5h is coasting → weekly binds even though
+        // its delta could be anything.
+        let now = 1_000_000_000_000i64;
+        let g = GovernorStatus {
+            window: tank(0.3, None),
+            week: Some(tank(1.4, Some(now + 500 * 60_000))),
+        };
+        assert!(g.binding().1, "the walling weekly tank should bind over a coasting 5h");
     }
 }

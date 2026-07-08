@@ -69,12 +69,24 @@ enum MenuShow: String, CaseIterable, Identifiable {
 }
 
 enum Gov {
-    /// The binding tank — whichever wall you'll hit first (larger delta).
+    /// The binding tank — the wall you'll hit *first*. A tank with `wallAt` set
+    /// runs dry before it resets, so the one with the **earliest** wall binds: a
+    /// nearly-full 5h window (wall minutes away) beats a high-ratio-but-days-away
+    /// weekly. Only when neither hits a wall before its reset do we fall back to
+    /// the larger throttle. (Max-delta is wrong here — the weekly budget is
+    /// spread over ~7 days, so its delta is almost always the larger one, which
+    /// made "Mix" resolve to weekly nearly always.)
     static func binding(_ g: GovernorStatus) -> (tank: Tank, isWeek: Bool) {
         let w = g.window
         guard let wk = g.week else { return (w, false) }
-        let wd = w.delta ?? 0, kd = wk.delta ?? 0
-        return kd > wd ? (wk, true) : (w, false)
+        switch (w.wallAt, wk.wallAt) {
+        case let (a?, b?): return b < a ? (wk, true) : (w, false)
+        case (_?, nil):    return (w, false)
+        case (nil, _?):    return (wk, true)
+        case (nil, nil):
+            let wd = w.delta ?? 0, kd = wk.delta ?? 0
+            return kd > wd ? (wk, true) : (w, false)
+        }
     }
 
     /// The tank the user picked (5h / weekly / binding-mix) plus a label.
