@@ -45,6 +45,14 @@ async function poll() {
   api.storage.local.set({ lastStatus: status });
 }
 
+// Let the popup force an immediate poll and get the result back.
+api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg === "pollNow") {
+    poll().then(() => api.storage.local.get("lastStatus").then((r) => sendResponse(r.lastStatus)));
+    return true; // async response
+  }
+});
+
 api.runtime.onInstalled.addListener(() => {
   api.alarms.create("poll", { periodInMinutes: PERIOD_MIN });
   poll();
