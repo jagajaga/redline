@@ -75,12 +75,29 @@ jobs:
           ln -s /Applications "$STAGE/Applications"
           hdiutil create -volname "Redline" -srcfolder "$STAGE" \
             -ov -format UDZO "Redline-${GITHUB_REF_NAME}-macos.dmg"
-          shasum -a 256 ccwatch-*.tar.gz Redline-*.zip Redline-*.dmg > checksums.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Package browser extension
+        env:
+          # Add these as repo secrets to get a signed, installable Firefox .xpi;
+          # without them, only the Chrome .zip is produced.
+          AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
+          AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
+        run: |
+          bash extension/pack.sh dist-ext
+          cp dist-ext/redline-usage-bridge-* . 2>/dev/null || true
+      - name: Checksums
+        run: |
+          shasum -a 256 ccwatch-*.tar.gz Redline-*.zip Redline-*.dmg \
+            redline-usage-bridge-* > checksums.txt 2>/dev/null \
+            || shasum -a 256 ccwatch-*.tar.gz Redline-*.zip Redline-*.dmg > checksums.txt
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            ccwatch-*.tar.gz Redline-*.dmg Redline-*.zip checksums.txt \
+            ccwatch-*.tar.gz Redline-*.dmg Redline-*.zip \
+            redline-usage-bridge-* checksums.txt \
             --title "Redline $GITHUB_REF_NAME" \
             --generate-notes
