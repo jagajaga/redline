@@ -140,7 +140,8 @@ impl Config {
                 continue;
             };
             let k = k.trim();
-            let v = v.trim().trim_matches('"');
+            // Strip an inline `# comment` after the value, then surrounding quotes.
+            let v = v.split('#').next().unwrap_or(v).trim().trim_matches('"');
             match k {
                 "idle_secs" => set_i64(&mut cfg.idle_secs, v),
                 "rate_window_secs" => set_i64(&mut cfg.rate_window_secs, v),
