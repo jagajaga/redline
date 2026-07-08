@@ -76,9 +76,10 @@ alerts. Run `ccwatch`, or hit **TUI** in the menu-bar popover.
 ## The Governor
 
 A fuel gauge for your real plan limits — both the 5-hour window *and* the weekly
-cap. It **anchors to Claude Code's own reported usage** ("*You've used 60% of
-your weekly limit*"), so the gauge matches Claude **exactly**, and falls back to
-learning the ceiling from your own 429 walls when no reading is available.
+cap. With the [browser extension](#-browser-extension-usage-bridge) it reads your
+**exact** usage % straight from claude.ai, so the gauge matches Claude to the
+percent. Without it, Redline anchors to any usage markers Claude Code writes into
+its transcripts, and otherwise learns the ceiling from your own 429 walls.
 Self-correcting, zero config, nothing to calibrate.
 
 A glance looks like this:
@@ -129,6 +130,8 @@ Every release is a **universal** build (Apple Silicon + Intel) and ships:
 | `Redline-*.dmg` | the macOS app — drag-to-`/Applications` installer |
 | `Redline-*.zip` | the same `Redline.app`, zipped (if you prefer) |
 | `ccwatch-*-macos-universal.tar.gz` | the terminal UI + daemon (`ccwatch`, `ccwatchd`) |
+| `redline-usage-bridge-firefox-*.xpi` | the Firefox add-on (signed) — feeds the Governor exact usage % |
+| `redline-usage-bridge-chrome-*.zip` | the Chrome / Chromium extension — same, load unpacked |
 | `checksums.txt` | SHA-256 of every asset |
 
 ### The macOS app (menu bar + dashboard window)
@@ -154,6 +157,18 @@ tar xzf ccwatch-*-macos-universal.tar.gz
 mv ccwatch/ccwatch ccwatch/ccwatchd /usr/local/bin/   # or anywhere on PATH
 ccwatch
 ```
+
+### 🧩 Browser extension (Usage Bridge)
+
+Claude's exact usage % lives behind Cloudflare, so a background app can't read
+it. The **Usage Bridge** runs inside your logged-in browser — the clean way past
+it — reads your 5-hour and weekly percentages from claude.ai and forwards them to
+the local daemon on `127.0.0.1`. **No credentials are stored, nothing leaves your
+machine**, and the Governor then matches Claude to the percent.
+
+- **Firefox** — open `redline-usage-bridge-firefox-*.xpi` (signed, self-distributed).
+- **Chrome / Chromium** — unzip `redline-usage-bridge-chrome-*.zip`, then
+  `chrome://extensions` → **Developer mode** → **Load unpacked**.
 
 ### From source
 
@@ -194,10 +209,11 @@ burn_tokens_per_min = 40000   # where the menu-bar graph turns red
 ## Under the hood
 
 ```
-~/.claude  ──┐                      ┌── ssh ── remote ~/.claude
-             ▼                      ▼
+~/.claude  ──┐   browser ext ──┐    ┌── ssh ── remote ~/.claude
+             ▼   (127.0.0.1)   ▼    ▼
           ccwatchd ── tails transcripts (new bytes only), watches pids,
-             │        computes rates · alerts · the Governor
+             │        exact usage % from the extension, computes rates ·
+             │        alerts · the Governor
              ├────────────────┐   unix socket, JSON snapshots
              ▼                ▼
         ccwatch (TUI)   Redline.app (menu bar + dashboard window, SwiftUI)
