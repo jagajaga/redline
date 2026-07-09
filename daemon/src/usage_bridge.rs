@@ -155,10 +155,12 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn as_pct(v: &Value) -> Option<u8> {
+    // Claude sends whole-number percentages (0–100): "1" means 1%, not the
+    // fraction 1.0. An earlier heuristic scaled n<=1 by 100, which turned a real
+    // 1% weekly reading into 100% (an empty tank).
     let n = v.as_f64()?;
-    let pct = if n <= 1.0 { n * 100.0 } else { n };
-    if (0.0..=100.0).contains(&pct) {
-        Some(pct.round() as u8)
+    if (0.0..=100.0).contains(&n) {
+        Some(n.round() as u8)
     } else {
         None
     }
@@ -294,6 +296,16 @@ mod tests {
         let (s, w) = parse_usage(&v, 1000);
         assert_eq!(s.map(|u| u.pct), Some(0), "0% session must be forwarded");
         assert_eq!(w.map(|u| u.pct), Some(0), "0% weekly must be forwarded");
+    }
+
+    #[test]
+    fn one_percent_is_one_not_a_hundred() {
+        // Regression: `utilization: 1` is 1%, not the fraction 1.0 (=100%).
+        let raw = r#"{"five_hour":{"utilization":4},"seven_day":{"utilization":1}}"#;
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let (s, w) = parse_usage(&v, 1000);
+        assert_eq!(s.map(|u| u.pct), Some(4));
+        assert_eq!(w.map(|u| u.pct), Some(1), "1% must stay 1%, not become 100%");
     }
 
     #[test]
