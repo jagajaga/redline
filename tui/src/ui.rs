@@ -78,7 +78,7 @@ fn governor_estimated(app: &App) -> bool {
     };
     let reported =
         |t: &ccwatch_core::model::Tank| t.budget_source == ccwatch_core::model::BudgetSource::Reported;
-    !reported(&g.window) && g.week.as_ref().map_or(true, |w| !reported(w))
+    !reported(&g.window) && g.week.as_ref().is_none_or(|w| !reported(w))
 }
 
 fn draw_topbar(f: &mut Frame, area: Rect, app: &App) {
