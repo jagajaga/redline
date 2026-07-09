@@ -191,7 +191,10 @@ fn parse_usage(v: &Value, now_ms: i64) -> (Option<UsagePct>, Option<UsagePct>) {
         weekly = weekly.or(hw);
     }
 
-    let mk = |p: Option<u8>| p.filter(|&p| p > 0).map(|pct| UsagePct { pct, at_ms: now_ms });
+    // A present `utilization: 0` is a real reading (a freshly-reset window), not
+    // "no data" — forward it. Only an absent field yields None (via the chain
+    // above). The governor treats a fresh 0% as an authoritative reset.
+    let mk = |p: Option<u8>| p.map(|pct| UsagePct { pct, at_ms: now_ms });
     (mk(session), mk(weekly))
 }
 
@@ -281,6 +284,16 @@ mod tests {
         let (s, w) = parse_usage(&v, 1000);
         assert_eq!(s.map(|u| u.pct), Some(46));
         assert_eq!(w.map(|u| u.pct), Some(10));
+    }
+
+    #[test]
+    fn forwards_zero_utilization_as_a_real_reading() {
+        // A freshly-reset window reports 0% — that's a reading, not "no data".
+        let raw = r#"{"five_hour":{"utilization":0},"seven_day":{"utilization":0}}"#;
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let (s, w) = parse_usage(&v, 1000);
+        assert_eq!(s.map(|u| u.pct), Some(0), "0% session must be forwarded");
+        assert_eq!(w.map(|u| u.pct), Some(0), "0% weekly must be forwarded");
     }
 
     #[test]

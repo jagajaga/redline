@@ -26,6 +26,9 @@ pub const BUCKET_MS: i64 = 5 * 60 * 1000;
 pub const DELTA_EMPTY: f64 = 99.0;
 /// Rate window for the "current speed" readout (matches the engine's default).
 const RATE_WINDOW_MS: i64 = 5 * 60 * 1000;
+/// How recent a reported reading must be to be trusted as a live reset signal.
+/// The extension refreshes every ~2 min, so a 0% older than this is stale.
+const REPORT_RESET_FRESH_MS: i64 = 15 * 60 * 1000;
 
 /// Round a timestamp down to its bucket.
 pub fn bucket_of(ts_ms: i64) -> i64 {
@@ -191,16 +194,26 @@ pub fn compute(
         cfg.governor_window_budget,
         learned_window_budget,
     );
-    let used = start_opt.map_or(0, |s| sum_range(buckets, s, now_ms));
-    let window = make_tank(
-        used,
-        w_budget,
-        w_source,
-        start,
-        start_opt.map(|s| s + window_ms),
-        rate_per_min,
-        now_ms,
-    );
+    // A fresh 0% report is authoritative: Claude's window just reset, so
+    // re-anchor here and count only the burn since. Otherwise a stale
+    // accumulation would read tens of % against an estimated budget even though
+    // Claude says the window is empty. (0% can't derive a budget, so the scale
+    // stays config/learned; used ≈ 0 makes the displayed % match Claude.)
+    let (tank_start, used, tank_source, resets) = match reported {
+        Some(r) if r.pct == 0 && now_ms - r.at_ms <= REPORT_RESET_FRESH_MS => (
+            r.at_ms,
+            sum_range(buckets, r.at_ms, now_ms),
+            BudgetSource::Reported,
+            Some(r.at_ms + window_ms),
+        ),
+        _ => (
+            start,
+            start_opt.map_or(0, |s| sum_range(buckets, s, now_ms)),
+            w_source,
+            start_opt.map(|s| s + window_ms),
+        ),
+    };
+    let window = make_tank(used, w_budget, tank_source, tank_start, resets, rate_per_min, now_ms);
 
     GovernorStatus { window, week: None }
 }
@@ -356,13 +369,20 @@ pub fn weekly_tank(
         Some(r) => (r - WEEK_MS, Some(r)),
         None => (now_ms - WEEK_MS, None),
     };
-    let used = sum_range(buckets, start, now_ms);
     // Precedence: Claude's reported % > config > learned-from-429.
-    let (budget, source) = pick_budget(
+    let (budget, source0) = pick_budget(
         budget_from_report(buckets, start, now_ms, reported, WEEK_MS),
         cfg_budget,
         learn_weekly(buckets, hits, true).map(|(b, _)| b),
     );
+    // A fresh 0% report re-anchors the week the same way the window tank does —
+    // Claude says it just reset, so read ~0% used, keeping the parsed reset.
+    let (start, used, source) = match reported {
+        Some(r) if r.pct == 0 && now_ms - r.at_ms <= REPORT_RESET_FRESH_MS => {
+            (r.at_ms, sum_range(buckets, r.at_ms, now_ms), BudgetSource::Reported)
+        }
+        _ => (start, sum_range(buckets, start, now_ms), source0),
+    };
     // Nothing to show if there's neither usage nor a budget nor a reset.
     if used == 0 && budget.is_none() && resets_at.is_none() {
         return None;
@@ -743,5 +763,37 @@ mod tests {
         let merged = merge_buckets(&[&a[..], &b[..]]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].1, 300);
+    }
+
+    #[test]
+    fn fresh_zero_report_wins_over_stale_accumulation() {
+        use crate::model::UsagePct;
+        // Redline accumulated ~350k this window (≈35% against the 1M budget), but
+        // Claude reports 0% right now — the window just reset. The 0% must win.
+        let b = buckets(&[(120, 200_000), (60, 150_000)]);
+        let fresh_zero = Some(UsagePct { pct: 0, at_ms: NOW - 5_000 });
+        let g = compute(&b, &[], NOW, &cfg(), None, fresh_zero);
+        assert_eq!(g.window.used, 0, "0% report zeroes stale usage");
+        assert_eq!(g.window.budget_source, BudgetSource::Reported);
+        let frac = g.window.used as f64 / g.window.budget.unwrap() as f64;
+        assert!(frac < 0.01, "displays ~0%, not 35%; got {:.1}%", frac * 100.0);
+
+        // Weekly too.
+        let wk = weekly_tank(&b, &[], NOW, Some(600_000_000), fresh_zero).unwrap();
+        assert_eq!(wk.used, 0);
+        assert_eq!(wk.budget_source, BudgetSource::Reported);
+
+        // A STALE 0% (older than the freshness window) must NOT override — it
+        // falls back to the real accumulation against config.
+        let stale_zero = Some(UsagePct { pct: 0, at_ms: NOW - 40 * 60_000 });
+        let g2 = compute(&b, &[], NOW, &cfg(), None, stale_zero);
+        assert_eq!(g2.window.used, 350_000, "stale 0% is ignored");
+        assert_eq!(g2.window.budget_source, BudgetSource::Config);
+
+        // A non-zero report is unchanged: budget derived so display == reported.
+        let live = Some(UsagePct { pct: 50, at_ms: NOW - 1_000 });
+        let g3 = compute(&b, &[], NOW, &cfg(), None, live);
+        assert_eq!(g3.window.budget_source, BudgetSource::Reported);
+        assert_eq!(g3.window.budget, Some(700_000), "budget = 350k / 0.50");
     }
 }
