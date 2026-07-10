@@ -47,6 +47,42 @@ struct CruiseRuntime {
 
 type SharedCruise = Arc<std::sync::Mutex<CruiseRuntime>>;
 
+/// Path of the persisted set of Cruise-paced pids. Read on startup (to release
+/// orphans a crashed daemon left stopped) and rewritten whenever `paced` changes.
+fn cruise_paced_file(paths: &Paths) -> std::path::PathBuf {
+    paths.ccwatch_dir().join("cruise-paced.json")
+}
+
+/// Persist the current `paced` set (best-effort; errors ignored). Called whenever
+/// the set changes so a restart's startup sweep can release exactly these pids.
+fn persist_paced(paths: &Paths, paced: &std::collections::HashSet<i32>) {
+    let pids: Vec<i32> = paced.iter().copied().collect();
+    if let Ok(json) = serde_json::to_string(&pids) {
+        let _ = std::fs::write(cruise_paced_file(paths), json);
+    }
+}
+
+/// Startup safety sweep: resume every pid a previous daemon left paused, so a
+/// crash/restart never leaves a live session frozen. Returns the count resumed.
+/// The persisted set is cleared afterward; if auto mode is still on, the next
+/// refresher tick re-pauses as needed (a brief gap is acceptable; a stuck
+/// session is not).
+fn sweep_orphaned_paced(paths: &Paths) -> usize {
+    let path = cruise_paced_file(paths);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return 0; // no file → nothing to sweep (fresh install / clean shutdown)
+    };
+    let pids: Vec<i32> = serde_json::from_str(&text).unwrap_or_default();
+    let mut resumed = 0usize;
+    for pid in pids {
+        if matches!(actions::resume(pid), ActionOutcome::Ok(_)) {
+            resumed += 1;
+        }
+    }
+    let _ = std::fs::write(&path, "[]"); // start clean regardless of resume outcome
+    resumed
+}
+
 fn main() -> anyhow::Result<()> {
     let paths = Paths::discover();
 
@@ -110,6 +146,14 @@ fn main() -> anyhow::Result<()> {
     // Shared latest snapshot, updated by the refresher thread.
     let shared: SharedSnapshot = Arc::new(RwLock::new(Arc::new(Snapshot::empty(0))));
 
+    // Startup safety sweep FIRST: resume any pids a previous daemon left paused,
+    // so a crash/restart never leaves a live session frozen. Then start with an
+    // empty `paced` set (the file is cleared by the sweep).
+    let swept = sweep_orphaned_paced(&paths);
+    if swept > 0 {
+        eprintln!("cruise: resumed {swept} orphaned paused session(s) from a previous run");
+    }
+
     // Cruise Control runtime state: default OFF unless config says otherwise.
     // Seeded from config now; updated at runtime only via `SetCruiseMode`.
     let cruise_config = Config::load(&paths.config_file());
@@ -155,6 +199,7 @@ fn main() -> anyhow::Result<()> {
         let paths2 = paths.clone();
         let remote_cache = remote_cache.clone();
         let remote_errors = manager.errors();
+        let cruise_paths = paths.clone(); // for persisting the paced set
         let learned_path = paths.ccwatch_dir().join("learned.json");
         let mut learned = load_learned(&learned_path);
         let mut pacer_state = ccwatch_core::pacer::PacerState { price: 0.0 };
@@ -243,19 +288,27 @@ fn main() -> anyhow::Result<()> {
             // advisory and make sure nothing stays paced.
             {
                 let mut c = cruise.lock().unwrap();
+                let before = c.paced.clone();
                 let plan_pause = snap.pacing.as_ref().map(|p| p.pause_pids()).unwrap_or_default();
                 let auto = c.mode == "auto";
                 let target_pause: Vec<i32> = if auto { plan_pause } else { Vec::new() };
                 let (to_pause, to_resume) =
                     ccwatch_core::pacer::reconcile_paced(&target_pause, &c.paced);
                 for pid in to_resume {
-                    let _ = ccwatch_core::actions::resume(pid);
-                    c.paced.remove(&pid);
+                    // Only untrack on a successful resume — a failed SIGCONT must
+                    // stay tracked so the next tick retries it (never leave a live
+                    // session frozen and forgotten).
+                    if matches!(ccwatch_core::actions::resume(pid), ccwatch_core::actions::ActionOutcome::Ok(_)) {
+                        c.paced.remove(&pid);
+                    }
                 }
                 for pid in to_pause {
                     if matches!(ccwatch_core::actions::pause(pid), ccwatch_core::actions::ActionOutcome::Ok(_)) {
                         c.paced.insert(pid);
                     }
+                }
+                if c.paced != before {
+                    persist_paced(&cruise_paths, &c.paced);
                 }
                 if let Some(p) = snap.pacing.as_mut() {
                     p.auto = auto;
@@ -412,7 +465,7 @@ fn push_loop(writer: &mut UnixStream, shared: &SharedSnapshot) -> anyhow::Result
 
 fn execute_action(
     req: &ActionRequest,
-    _paths: &Paths,
+    paths: &Paths,
     remote_defs: &[RemoteDef],
     snapshot: &Snapshot,
     cruise: &SharedCruise,
@@ -445,17 +498,26 @@ fn execute_action(
             ActionOutcome::Ok(format!("Cruise: paused {paused} background session(s)"))
         }
         ActionRequest::SetCruiseMode { mode } => {
+            // Normalize so "Auto"/" auto " engage auto instead of silently
+            // acting as off.
+            let mode = mode.trim().to_lowercase();
             let mut c = cruise.lock().unwrap();
             c.mode = mode.clone();
             let mut released = 0usize;
             if mode != "auto" {
-                // Release: resume everything Cruise paused.
-                for pid in c.paced.drain().collect::<Vec<_>>() {
+                // Release: resume everything Cruise paused. Snapshot the pids
+                // (don't drain) so a failed SIGCONT stays tracked — the
+                // continuous non-auto reconcile in the refresher retries it
+                // (target_pause=[] → to_resume includes everything still paced).
+                let pids: Vec<i32> = c.paced.iter().copied().collect();
+                for pid in pids {
                     if matches!(actions::resume(pid), ActionOutcome::Ok(_)) {
+                        c.paced.remove(&pid);
                         released += 1;
                     }
                 }
             }
+            persist_paced(paths, &c.paced);
             ActionOutcome::Ok(format!("Cruise mode = {mode}; released {released}"))
         }
     }
@@ -602,7 +664,9 @@ mod pacing_tests {
 
 #[cfg(test)]
 mod cruise_tests {
+    use super::{cruise_paced_file, persist_paced, sweep_orphaned_paced};
     use ccwatch_core::pacer::reconcile_paced;
+    use ccwatch_core::Paths;
     use std::collections::HashSet;
 
     #[test]
@@ -613,5 +677,46 @@ mod cruise_tests {
         let (to_pause, to_resume) = reconcile_paced(&[], &paced);
         assert!(to_pause.is_empty());
         assert_eq!(to_resume.len(), 3);
+    }
+
+    #[test]
+    fn paced_file_round_trips_the_set() {
+        let root = std::env::temp_dir().join(format!("ccw-paced-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::new(&root);
+        std::fs::create_dir_all(paths.ccwatch_dir()).unwrap();
+
+        let paced: HashSet<i32> = [101, 202, 303].into_iter().collect();
+        persist_paced(&paths, &paced);
+
+        let text = std::fs::read_to_string(cruise_paced_file(&paths)).unwrap();
+        let back: HashSet<i32> = serde_json::from_str::<Vec<i32>>(&text)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(back, paced, "persisted paced set must round-trip");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sweep_is_a_noop_when_file_absent_and_clears_after() {
+        let root = std::env::temp_dir().join(format!("ccw-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::new(&root);
+        std::fs::create_dir_all(paths.ccwatch_dir()).unwrap();
+
+        // No file → nothing to sweep, no crash, no file created.
+        assert_eq!(sweep_orphaned_paced(&paths), 0);
+        assert!(!cruise_paced_file(&paths).exists());
+
+        // With dead/never-existed pids, resume() fails so none are counted, and
+        // the file is cleared to an empty array regardless.
+        persist_paced(&paths, &[2_000_000_001, 2_000_000_002].into_iter().collect());
+        let _ = sweep_orphaned_paced(&paths); // resume of bogus pids fails → 0-ish
+        let after = std::fs::read_to_string(cruise_paced_file(&paths)).unwrap();
+        assert_eq!(after.trim(), "[]", "sweep must clear the file");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
