@@ -14,6 +14,7 @@ pub mod governor;
 pub mod ipc;
 pub mod leaks;
 pub mod model;
+pub mod pacer;
 pub mod paths;
 pub mod remote;
 
