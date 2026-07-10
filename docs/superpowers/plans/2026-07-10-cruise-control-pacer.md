@@ -573,6 +573,26 @@ background sessions, and asserts the plan pauses background (never foreground):
             "the low-burn fleet must pause before the bigger non-fleet loop"
         );
     }
+
+    #[test]
+    fn price_is_finite_and_snapshot_round_trips_with_an_idle_candidate() {
+        // An idle (0 tok/min) Background session must not make price INFINITY
+        // (which serializes to null and drops the whole snapshot on the client).
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        snap.sessions = vec![
+            sess("burner", 20, "loop", now - 5_000, 300_000.0),
+            sess("idle", 21, "loop", now - 5_000, 0.0), // idle background, pid present
+        ];
+        let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
+        assert!(planr.price.is_finite(), "price must stay finite, got {}", planr.price);
+        snap.pacing = Some(planr);
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("\"price\":null"), "price must not serialize to null");
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
+        assert!(back.pacing.is_some(), "snapshot with pacing must round-trip");
+    }
 ```
 
 - [ ] **Step 3: Add the test-only `Session` helper**
@@ -692,11 +712,13 @@ impl Default for PacerConfig {
 /// inputs. Selection is a greedy **value-density knapsack** for our discrete
 /// whole-session actuator: fleets are a strict harm-tier that always sheds before
 /// non-fleet Background, and within a tier the lowest value-density (`weight /
-/// burn`) pauses first, until projected burn ≤ target. The reported price `λ` is
-/// the value-density at the cut. Foreground is never touched. (The mirror-descent
-/// primitives `update_price` / `aimd_on_429` provide the smooth continuous price
-/// for a future finer-grained actuator; the discrete knapsack here is exact and
-/// immediate.)
+/// burn`) pauses first, until projected burn ≤ target. Foreground is never
+/// touched. The reported `price` (and `PacerState.price`) is the value-density at
+/// the knapsack cut (`weight / burn`) — NOT the mirror-descent λ from
+/// `update_price`; a future continuous controller must not seed `update_price`
+/// with it. (`update_price` / `aimd_on_429` are the smooth continuous-price
+/// primitives for a future finer-grained actuator; the discrete knapsack here is
+/// exact and immediate.)
 pub fn plan(
     snap: &Snapshot,
     cfg: &PacerConfig,
@@ -739,8 +761,11 @@ pub fn plan(
         .sessions
         .iter()
         .filter(|s| {
-            priority_of(&s.entrypoint, s.last_activity, now_ms, cfg.idle_secs)
-                == Priority::Background
+            // Only Background sessions that are actually burning — pausing an idle
+            // (0 tok/min) session does nothing, and its density would be INFINITY.
+            s.tokens_per_min > 0.0
+                && priority_of(&s.entrypoint, s.last_activity, now_ms, cfg.idle_secs)
+                    == Priority::Background
         })
         .filter_map(|s| {
             let pid = s.pid?;
@@ -778,6 +803,11 @@ pub fn plan(
             price = density(c); // last session we pause sets the cut price
         }
     }
+
+    // Never report a non-finite price: it serializes to JSON `null` and the client
+    // (non-optional f64) drops the whole snapshot. Zero-burn candidates are already
+    // excluded, so this is defensive.
+    let price = price.min(MAX_PRICE);
 
     // Distinguish "coasting" from "over target but nothing we may pause" — the
     // latter is a real state (only the exempt foreground is left) and must not be
