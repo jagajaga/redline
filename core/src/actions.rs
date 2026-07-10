@@ -48,6 +48,62 @@ pub fn resume(pid: i32) -> ActionOutcome {
     }
 }
 
+/// Build the `ssh` argv to send `signal` to `pid` on `ssh_target`. Kept pure so
+/// it can be unit-tested without a network. `BatchMode=yes` fails fast instead of
+/// prompting for a password, and `ConnectTimeout` bounds how long an unreachable
+/// host can stall the caller (the refresher runs actuations synchronously). The
+/// pid is a plain integer and the target comes from trusted remote config, so
+/// there's no shell to inject into — every piece is a separate argv element.
+pub fn ssh_signal_args(ssh_target: &str, pid: i32, sig: &str) -> Vec<String> {
+    vec![
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "ConnectTimeout=5".into(),
+        ssh_target.into(),
+        "kill".into(),
+        format!("-{sig}"),
+        pid.to_string(),
+    ]
+}
+
+/// Send `signal` to `pid` on a remote host over SSH. Returns whether ssh+kill
+/// reported success (a network/auth failure is a `false`, never a panic).
+pub fn signal_remote(ssh_target: &str, pid: i32, sig: &str) -> bool {
+    if pid <= 0 || ssh_target.is_empty() {
+        return false;
+    }
+    Command::new("ssh")
+        .args(ssh_signal_args(ssh_target, pid, sig))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Freeze a remote process (`ssh <target> kill -STOP <pid>`).
+pub fn pause_remote(ssh_target: &str, pid: i32) -> ActionOutcome {
+    if signal_remote(ssh_target, pid, "STOP") {
+        ActionOutcome::Ok(format!("paused pid {pid} on {ssh_target} (SIGSTOP)"))
+    } else {
+        ActionOutcome::Failed(format!("could not pause pid {pid} on {ssh_target}"))
+    }
+}
+
+/// Resume a remote process (`ssh <target> kill -CONT <pid>`).
+pub fn resume_remote(ssh_target: &str, pid: i32) -> ActionOutcome {
+    if signal_remote(ssh_target, pid, "CONT") {
+        ActionOutcome::Ok(format!("resumed pid {pid} on {ssh_target} (SIGCONT)"))
+    } else {
+        ActionOutcome::Failed(format!("could not resume pid {pid} on {ssh_target}"))
+    }
+}
+
+/// Is a remote pid alive? (`ssh <target> kill -0 <pid>`.) An unreachable host
+/// reads as not-alive — callers must treat that as "can't confirm", not "dead".
+pub fn alive_remote(ssh_target: &str, pid: i32) -> bool {
+    signal_remote(ssh_target, pid, "0")
+}
+
 /// Terminate a background command (single SIGTERM).
 pub fn kill_background(pid: i32) -> ActionOutcome {
     if signal(pid, "TERM") {
@@ -143,6 +199,28 @@ mod tests {
         assert!(matches!(out, ActionOutcome::Ok(_)), "got {out:?}");
         let _ = child.wait();
         assert!(!alive(pid));
+    }
+
+    #[test]
+    fn ssh_signal_args_are_separate_argv_elements() {
+        // Every piece is its own argv element (no shell string to inject into),
+        // BatchMode + ConnectTimeout are present, and the pid/signal are last.
+        let args = ssh_signal_args("user@host", 4242, "STOP");
+        assert_eq!(
+            args,
+            vec![
+                "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "user@host", "kill", "-STOP",
+                "4242"
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_signal_rejects_bad_input() {
+        // Guard rails: a non-positive pid or empty target never spawns ssh.
+        assert!(!signal_remote("host", 0, "STOP"));
+        assert!(!signal_remote("host", -1, "STOP"));
+        assert!(!signal_remote("", 100, "STOP"));
     }
 
     #[test]

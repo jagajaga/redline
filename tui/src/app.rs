@@ -724,6 +724,7 @@ mod tests {
             price: 1e-5,
             actions: vec![PaceAction::Pause {
                 pid: 7,
+                ssh: None,
                 reason: "x".into(),
             }],
             reason: "over".into(),

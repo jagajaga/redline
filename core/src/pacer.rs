@@ -4,7 +4,7 @@
 //! descent); an AIMD overlay handles the 429 shock. No enforcement here.
 
 use std::collections::HashSet;
-use crate::model::{Agent, PaceAction, PacingPlan, Priority, Session, Snapshot};
+use crate::model::{Agent, Host, PaceAction, PaceTarget, PacingPlan, Priority, Session, Snapshot};
 
 /// Interactive entrypoints. A session on one of these, with a recent user turn,
 /// is the foreground and is exempt.
@@ -89,9 +89,13 @@ pub fn aimd_on_429(price: f64, cut: f64) -> f64 {
     (price.max(AIMD_FLOOR) * cut).min(MAX_PRICE)
 }
 
-/// A Background session considered for pausing.
+/// A Background session considered for pausing. `ssh` is `None` for a local
+/// session (paused with a local `kill(pid, SIGSTOP)`) and `Some(target)` for a
+/// remote one (paused with `ssh <target> kill -STOP <pid>`). The actuator is
+/// chosen by this field, so a remote pid is never signalled as a local pid.
 struct Candidate {
     pid: i32,
+    ssh: Option<String>,
     label: String,
     burn: f64,
     is_fleet: bool,
@@ -210,7 +214,14 @@ pub fn plan(
     let deadline = cfg.deadline_ms.or(tank.resets_at);
     let mins = deadline.map(|d| (d - now_ms) as f64 / 60_000.0).unwrap_or(0.0);
     let mut target = target_rate(remaining, cfg.reserve, mins);
-    let actual = tank.rate_per_min;
+    // Sanitize the burn: a non-finite `actual_rate` serializes to JSON `null`,
+    // and the client's non-optional `f64` then drops the whole snapshot. Same
+    // hazard `price` is guarded against below.
+    let actual = if tank.rate_per_min.is_finite() {
+        tank.rate_per_min
+    } else {
+        0.0
+    };
 
     // A fresh 429 is a hard signal the smooth pace is too slow: pace to a fraction
     // of target until it clears (AIMD, expressed in target space).
@@ -222,24 +233,29 @@ pub fn plan(
     // have a live pid (foreground / High is excluded before we ever plan). Each
     // knows whether it's a fleet and carries a human label so every action reads
     // the way the user thinks. Zero-burn sessions are excluded: pausing one does
-    // nothing, and its infinite value-density would poison the cut price. A
-    // Remote/Cloud session's pid lives on a DIFFERENT machine — `actions::pause`
-    // is a local `kill(pid, SIGSTOP)`, so actuating on a remote pid would freeze
-    // an arbitrary local process that happens to share the number. Only Local
-    // sessions are actuatable.
+    // nothing, and its infinite value-density would poison the cut price.
+    //
+    // Actuator by host: a Local session is paused with a local `kill(pid,SIGSTOP)`
+    // (`ssh: None`); a Remote session is paused with `ssh <target> kill -STOP`
+    // (`ssh: Some(target)`), so a remote pid is NEVER signalled as a local pid.
+    // Cloud sessions have no reachable actuator and are excluded.
     let mut candidates: Vec<Candidate> = snap
         .sessions
         .iter()
         .filter(|s| {
             s.tokens_per_min > 0.0
-                && matches!(s.host, crate::model::Host::Local)
+                && !matches!(s.host, Host::Cloud)
                 && priority_of(&s.entrypoint, s.last_activity, now_ms, cfg.idle_secs)
                     == Priority::Background
         })
         .filter_map(|s| {
             let pid = s.pid?;
+            let ssh = match &s.host {
+                Host::Remote { ssh_target, .. } => Some(ssh_target.clone()),
+                _ => None,
+            };
             let (is_fleet, label) = fleet_label(s);
-            Some(Candidate { pid, label, burn: s.tokens_per_min, is_fleet })
+            Some(Candidate { pid, ssh, label, burn: s.tokens_per_min, is_fleet })
         })
         .collect();
 
@@ -264,9 +280,17 @@ pub fn plan(
                 price = density(c); // first session we keep sets the cut price
                 break;
             }
+            let where_ = match &c.ssh {
+                Some(t) => format!(" on {t}"),
+                None => String::new(),
+            };
             actions.push(PaceAction::Pause {
                 pid: c.pid,
-                reason: format!("pause {}: {:.0}/min (value-density {:.1e})", c.label, c.burn, density(c)),
+                ssh: c.ssh.clone(),
+                reason: format!(
+                    "pause {}{}: {:.0}/min (value-density {:.1e})",
+                    c.label, where_, c.burn, density(c)
+                ),
             });
             projected -= c.burn;
             price = density(c); // last session we pause sets the cut price
@@ -293,14 +317,41 @@ pub fn plan(
     )
 }
 
-/// Given the pids the current plan wants paused and the set Cruise has already
-/// paused, return `(to_pause, to_resume)`: newly-named pids to pause, and
-/// already-paced pids no longer in the plan to resume (recovery). Pure.
-pub fn reconcile_paced(plan_pause: &[i32], paced: &HashSet<i32>) -> (Vec<i32>, Vec<i32>) {
-    let want: HashSet<i32> = plan_pause.iter().copied().collect();
-    let to_pause: Vec<i32> = plan_pause.iter().copied().filter(|p| !paced.contains(p)).collect();
-    let to_resume: Vec<i32> = paced.iter().copied().filter(|p| !want.contains(p)).collect();
+/// Given the targets the current plan wants paused and the set Cruise has already
+/// paused, return `(to_pause, to_resume)`: newly-named targets to pause, and
+/// already-paced targets no longer in the plan to resume (recovery). Pure. Keyed
+/// by `PaceTarget` (pid + host), so a local and a remote pid that share a number
+/// are distinct.
+pub fn reconcile_paced(
+    plan_pause: &[PaceTarget],
+    paced: &HashSet<PaceTarget>,
+) -> (Vec<PaceTarget>, Vec<PaceTarget>) {
+    let want: HashSet<PaceTarget> = plan_pause.iter().cloned().collect();
+    let to_pause: Vec<PaceTarget> =
+        plan_pause.iter().filter(|p| !paced.contains(p)).cloned().collect();
+    let to_resume: Vec<PaceTarget> =
+        paced.iter().filter(|p| !want.contains(p)).cloned().collect();
     (to_pause, to_resume)
+}
+
+/// Decide the pause/resume actions the Cruise runtime should take this tick.
+///
+/// In **auto** mode, reconcile the live paced set toward the plan (pause newly
+/// named, resume recovered). In **any non-auto** mode (off/advisory/oneclick),
+/// take NO pause or resume action: a manual one-click Apply must persist until an
+/// explicit Release (`SetCruiseMode`), so the per-tick loop must not silently
+/// resume it. (Pruning targets whose process has exited is the daemon's job — it
+/// needs live syscalls this pure function can't make.) Pure.
+pub fn cruise_plan_actions(
+    auto: bool,
+    plan_pause: &[PaceTarget],
+    paced: &HashSet<PaceTarget>,
+) -> (Vec<PaceTarget>, Vec<PaceTarget>) {
+    if auto {
+        reconcile_paced(plan_pause, paced)
+    } else {
+        (Vec::new(), Vec::new())
+    }
 }
 
 #[cfg(test)]
@@ -492,7 +543,7 @@ mod tests {
         // The fleet is paused FIRST (before the bigger non-fleet burner) and its
         // action is labeled as the fleet with its agent count.
         match &planr.actions[0] {
-            PaceAction::Pause { pid, reason } => {
+            PaceAction::Pause { pid, reason, .. } => {
                 assert_eq!(*pid, 30, "fleet-session paused first, even though it burns less");
                 assert!(reason.contains("fleet score_v3 (52 agents)"), "reason: {reason}");
             }
@@ -520,11 +571,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_sessions_are_never_selected_for_pause() {
-        // `actions::pause` is a local `kill(pid, SIGSTOP)` — a Remote session's
-        // pid belongs to a DIFFERENT machine, so pausing it would SIGSTOP an
-        // arbitrary local process that happens to reuse that pid number. Only
-        // Local sessions may ever be pause candidates.
+    fn remote_sessions_pause_via_ssh_not_a_local_pid() {
+        // A Remote session IS pausable — but its pause target must carry the ssh
+        // host so the daemon actuates with `ssh <target> kill -STOP`, never a
+        // local `kill(pid)` that would freeze whatever local process reuses that
+        // pid number. A Local session's target has `ssh: None`.
         use crate::model::Host;
         let now = 1_000_000_000_000;
         let mut snap = Snapshot::empty(now);
@@ -533,14 +584,39 @@ mod tests {
         remote.host = Host::Remote { name: "r".into(), ssh_target: "u@h".into() };
         snap.sessions = vec![
             sess("localLoop", 20, "loop", now - 5_000, 300_000.0), // local background
-            remote,                                                // remote background — must never pause
+            remote,                                                // remote background — pause via ssh
         ];
         let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
 
-        assert!(!planr.actions.is_empty(), "expected the local session to be paced");
+        let targets = planr.pause_targets();
+        let local = targets.iter().find(|t| t.pid == 20).expect("local pid must be a candidate");
+        assert_eq!(local.ssh, None, "a local pause target must have no ssh host");
+        let rem = targets.iter().find(|t| t.pid == 99).expect("remote pid must be a candidate");
+        assert_eq!(
+            rem.ssh.as_deref(),
+            Some("u@h"),
+            "a remote pause target must carry its ssh host so it's never a local kill"
+        );
+    }
+
+    #[test]
+    fn cloud_sessions_are_never_selected_for_pause() {
+        // Cloud sessions have no reachable actuator (no local pid, no ssh target)
+        // and must never be selected.
+        use crate::model::Host;
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        let mut cloud = sess("cloudLoop", 77, "loop", now - 5_000, 300_000.0);
+        cloud.host = Host::Cloud;
+        snap.sessions = vec![
+            sess("localLoop", 20, "loop", now - 5_000, 300_000.0),
+            cloud,
+        ];
+        let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
         let paused = planr.pause_pids();
-        assert!(paused.contains(&20), "the local pid should be a pause candidate");
-        assert!(!paused.contains(&99), "a remote pid must never be selected for pause");
+        assert!(paused.contains(&20));
+        assert!(!paused.contains(&77), "a cloud pid must never be selected for pause");
     }
 
     #[test]
@@ -563,24 +639,61 @@ mod tests {
         assert!(back.pacing.is_some(), "snapshot with pacing must round-trip");
     }
 
+    fn local(pid: i32) -> PaceTarget {
+        PaceTarget { pid, ssh: None }
+    }
+
     #[test]
     fn reconcile_pauses_new_and_resumes_recovered() {
         use std::collections::HashSet;
         // Currently pacing pids {2,3}. The plan now wants {3,4}.
         // → pause 4 (new), resume 2 (no longer in the plan), leave 3.
-        let paced: HashSet<i32> = [2, 3].into_iter().collect();
-        let (to_pause, to_resume) = reconcile_paced(&[3, 4], &paced);
-        assert_eq!(to_pause, vec![4]);
-        assert_eq!(to_resume, vec![2]);
+        let paced: HashSet<PaceTarget> = [local(2), local(3)].into_iter().collect();
+        let (to_pause, to_resume) = reconcile_paced(&[local(3), local(4)], &paced);
+        assert_eq!(to_pause, vec![local(4)]);
+        assert_eq!(to_resume, vec![local(2)]);
     }
 
     #[test]
     fn reconcile_empty_plan_resumes_all_paced() {
         use std::collections::HashSet;
-        let paced: HashSet<i32> = [7, 8].into_iter().collect();
+        let paced: HashSet<PaceTarget> = [local(7), local(8)].into_iter().collect();
         let (to_pause, mut to_resume) = reconcile_paced(&[], &paced);
-        to_resume.sort();
+        to_resume.sort_by_key(|t| t.pid);
         assert!(to_pause.is_empty());
-        assert_eq!(to_resume, vec![7, 8]);
+        assert_eq!(to_resume, vec![local(7), local(8)]);
+    }
+
+    #[test]
+    fn reconcile_distinguishes_local_and_remote_same_pid() {
+        use std::collections::HashSet;
+        // A local pid 5 and a remote pid 5 are DIFFERENT targets: with only the
+        // remote paced and the plan wanting only the local, we pause the local and
+        // resume the remote — never confuse the two.
+        let remote5 = PaceTarget { pid: 5, ssh: Some("u@h".into()) };
+        let paced: HashSet<PaceTarget> = [remote5.clone()].into_iter().collect();
+        let (to_pause, to_resume) = reconcile_paced(&[local(5)], &paced);
+        assert_eq!(to_pause, vec![local(5)]);
+        assert_eq!(to_resume, vec![remote5]);
+    }
+
+    #[test]
+    fn cruise_non_auto_never_resumes_manual_pauses() {
+        use std::collections::HashSet;
+        // The sticky-Apply invariant: in any non-auto mode the per-tick loop takes
+        // NO action, so a manually-applied pause survives until an explicit Release.
+        let paced: HashSet<PaceTarget> = [local(7), local(9)].into_iter().collect();
+        let (to_pause, to_resume) = cruise_plan_actions(false, &[], &paced);
+        assert!(to_pause.is_empty());
+        assert!(to_resume.is_empty(), "non-auto must not resume manual pauses");
+    }
+
+    #[test]
+    fn cruise_auto_reconciles_to_the_plan() {
+        use std::collections::HashSet;
+        let paced: HashSet<PaceTarget> = [local(7)].into_iter().collect();
+        let (to_pause, to_resume) = cruise_plan_actions(true, &[local(9)], &paced);
+        assert_eq!(to_pause, vec![local(9)]);
+        assert_eq!(to_resume, vec![local(7)]);
     }
 }

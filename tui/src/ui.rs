@@ -1051,6 +1051,7 @@ mod tests {
             price: 1.0e-5,
             actions: vec![PaceAction::Pause {
                 pid: 42,
+                ssh: None,
                 reason: "pause fleet score_v3 (52 agents): 300000/min (value-density 1.0e-5)".into(),
             }],
             reason: "500000 over target → pausing 1 background session(s)".into(),

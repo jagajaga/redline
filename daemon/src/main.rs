@@ -12,7 +12,7 @@ mod usage_bridge;
 
 use ccwatch_core::actions::{self, ActionOutcome};
 use ccwatch_core::ipc::{ActionRequest, ClientMsg, ServerMsg};
-use ccwatch_core::model::Snapshot;
+use ccwatch_core::model::{PaceTarget, Snapshot};
 use ccwatch_core::remote::{self, RemoteDef, SystemRunner};
 use ccwatch_core::{Config, Engine, Paths};
 use remotes::RemoteManager;
@@ -40,14 +40,40 @@ type SharedSnapshot = Arc<RwLock<Arc<Snapshot>>>;
 #[derive(Default)]
 struct CruiseRuntime {
     mode: String, // "off" | "advisory" | "oneclick" | "auto"
-    paced: std::collections::HashSet<i32>,
+    paced: std::collections::HashSet<PaceTarget>,
     #[allow(dead_code)]
     last_log: Option<String>,
 }
 
 type SharedCruise = Arc<std::sync::Mutex<CruiseRuntime>>;
 
-/// Path of the persisted set of Cruise-paced pids. Read on startup (to release
+/// Pause a target with the actuator its host requires: a local `kill(pid,SIGSTOP)`
+/// when `ssh` is None, else `ssh <target> kill -STOP <pid>` on the remote host.
+/// A remote pid is thus never signalled as a local pid.
+fn do_pause(t: &PaceTarget) -> bool {
+    match &t.ssh {
+        None => matches!(actions::pause(t.pid), ActionOutcome::Ok(_)),
+        Some(h) => matches!(actions::pause_remote(h, t.pid), ActionOutcome::Ok(_)),
+    }
+}
+
+/// Resume a target (local SIGCONT or `ssh … kill -CONT`).
+fn do_resume(t: &PaceTarget) -> bool {
+    match &t.ssh {
+        None => matches!(actions::resume(t.pid), ActionOutcome::Ok(_)),
+        Some(h) => matches!(actions::resume_remote(h, t.pid), ActionOutcome::Ok(_)),
+    }
+}
+
+/// Is a target's process still alive? (Local `kill -0`, or `ssh … kill -0`.)
+fn do_alive(t: &PaceTarget) -> bool {
+    match &t.ssh {
+        None => actions::alive(t.pid),
+        Some(h) => actions::alive_remote(h, t.pid),
+    }
+}
+
+/// Path of the persisted set of Cruise-paced targets. Read on startup (to release
 /// orphans a crashed daemon left stopped) and rewritten whenever `paced` changes.
 fn cruise_paced_file(paths: &Paths) -> std::path::PathBuf {
     paths.ccwatch_dir().join("cruise-paced.json")
@@ -55,9 +81,9 @@ fn cruise_paced_file(paths: &Paths) -> std::path::PathBuf {
 
 /// Persist the current `paced` set (best-effort; errors ignored). Called whenever
 /// the set changes so a restart's startup sweep can release exactly these pids.
-fn persist_paced(paths: &Paths, paced: &std::collections::HashSet<i32>) {
-    let pids: Vec<i32> = paced.iter().copied().collect();
-    if let Ok(json) = serde_json::to_string(&pids) {
+fn persist_paced(paths: &Paths, paced: &std::collections::HashSet<PaceTarget>) {
+    let targets: Vec<PaceTarget> = paced.iter().cloned().collect();
+    if let Ok(json) = serde_json::to_string(&targets) {
         let _ = std::fs::write(cruise_paced_file(paths), json);
     }
 }
@@ -72,10 +98,10 @@ fn sweep_orphaned_paced(paths: &Paths) -> usize {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return 0; // no file → nothing to sweep (fresh install / clean shutdown)
     };
-    let pids: Vec<i32> = serde_json::from_str(&text).unwrap_or_default();
+    let targets: Vec<PaceTarget> = serde_json::from_str(&text).unwrap_or_default();
     let mut resumed = 0usize;
-    for pid in pids {
-        if matches!(actions::resume(pid), ActionOutcome::Ok(_)) {
+    for t in &targets {
+        if do_resume(t) {
             resumed += 1;
         }
     }
@@ -118,30 +144,6 @@ fn main() -> anyhow::Result<()> {
     // last one has been gone for a grace period. A surviving client (TUI or
     // menu bar) keeps it alive; `--persist` opts out entirely.
     let subscribers = Arc::new(AtomicUsize::new(0));
-    if !std::env::args().any(|a| a == "--persist") {
-        let grace = std::env::var("CCWATCH_IDLE_EXIT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(IDLE_EXIT);
-        let subs = subscribers.clone();
-        let sock = sock.clone();
-        let pidfile = paths.pidfile();
-        std::thread::spawn(move || {
-            let mut last_active = Instant::now();
-            loop {
-                std::thread::sleep(Duration::from_millis(1000));
-                if subs.load(Ordering::Relaxed) > 0 {
-                    last_active = Instant::now();
-                } else if last_active.elapsed() > grace {
-                    eprintln!("no clients for {grace:?}; exiting");
-                    let _ = std::fs::remove_file(&sock);
-                    let _ = std::fs::remove_file(&pidfile);
-                    std::process::exit(0);
-                }
-            }
-        });
-    }
 
     // Shared latest snapshot, updated by the refresher thread.
     let shared: SharedSnapshot = Arc::new(RwLock::new(Arc::new(Snapshot::empty(0))));
@@ -163,6 +165,48 @@ fn main() -> anyhow::Result<()> {
         mode: cruise_config.cruise_mode.trim().to_lowercase(),
         ..Default::default()
     }));
+
+    // Idle self-exit: if no client subscribes for `grace`, shut down — but NEVER
+    // leave a session frozen. Resume everything Cruise paused and clear the record
+    // first, so a SIGSTOP'd session can't be stranded until some future daemon
+    // launch happens to run the startup sweep (a headless paused session can't
+    // trigger that launch). Spawned AFTER `cruise` exists so it can reach it.
+    if !std::env::args().any(|a| a == "--persist") {
+        let grace = std::env::var("CCWATCH_IDLE_EXIT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(IDLE_EXIT);
+        let subs = subscribers.clone();
+        let sock = sock.clone();
+        let pidfile = paths.pidfile();
+        let cruise = cruise.clone();
+        let cruise_paths = paths.clone();
+        std::thread::spawn(move || {
+            let mut last_active = Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_millis(1000));
+                if subs.load(Ordering::Relaxed) > 0 {
+                    last_active = Instant::now();
+                } else if last_active.elapsed() > grace {
+                    eprintln!("no clients for {grace:?}; exiting");
+                    // Release before exit: resume every Cruise-paused target so
+                    // none stay frozen with no running daemon to sweep them.
+                    {
+                        let mut c = cruise.lock().unwrap();
+                        for t in c.paced.iter() {
+                            let _ = do_resume(t);
+                        }
+                        c.paced.clear();
+                        persist_paced(&cruise_paths, &c.paced);
+                    }
+                    let _ = std::fs::remove_file(&sock);
+                    let _ = std::fs::remove_file(&pidfile);
+                    std::process::exit(0);
+                }
+            }
+        });
+    }
 
     // Remote/cloud hosts: fetched on their own cadence, cached, merged in.
     let remote_defs = remote::load_remotes(&paths.remotes_file());
@@ -286,34 +330,41 @@ fn main() -> anyhow::Result<()> {
             pacer_state = next_state;
             snap.pacing = Some(plan);
 
-            // Autonomous enforcement — ONLY in "auto". Otherwise leave the plan
-            // advisory and make sure nothing stays paced.
+            // Autonomous enforcement — ONLY in "auto". In any non-auto mode the
+            // per-tick loop takes NO pause/resume action, so a manual one-click
+            // Apply stays paused until an explicit Release (`cruise_plan_actions`).
             {
                 let mut c = cruise.lock().unwrap();
                 let before = c.paced.clone();
-                let plan_pause = snap.pacing.as_ref().map(|p| p.pause_pids()).unwrap_or_default();
+                let plan_pause = snap
+                    .pacing
+                    .as_ref()
+                    .map(|p| p.pause_targets())
+                    .unwrap_or_default();
                 let auto = c.mode == "auto";
-                let target_pause: Vec<i32> = if auto { plan_pause } else { Vec::new() };
                 let (to_pause, to_resume) =
-                    ccwatch_core::pacer::reconcile_paced(&target_pause, &c.paced);
-                for pid in to_resume {
-                    // Untrack on a successful resume — a failed SIGCONT must
-                    // stay tracked so the next tick retries it (never leave a live
-                    // session frozen and forgotten) — UNLESS the process is no
-                    // longer alive, in which case retrying forever would just be
-                    // a failing syscall every tick and a `paced` count stuck on a
-                    // dead pid: also untrack those.
-                    if matches!(ccwatch_core::actions::resume(pid), ccwatch_core::actions::ActionOutcome::Ok(_))
-                        || !ccwatch_core::actions::alive(pid)
-                    {
-                        c.paced.remove(&pid);
+                    ccwatch_core::pacer::cruise_plan_actions(auto, &plan_pause, &c.paced);
+                for t in to_resume {
+                    // Untrack on a successful resume — a failed resume stays tracked
+                    // so the next tick retries it (never leave a live session frozen
+                    // and forgotten) — UNLESS the process is gone, in which case
+                    // retrying forever would just fail every tick and stick the
+                    // `paced` count on a dead pid: untrack those too.
+                    if do_resume(&t) || !do_alive(&t) {
+                        c.paced.remove(&t);
                     }
                 }
-                for pid in to_pause {
-                    if matches!(ccwatch_core::actions::pause(pid), ccwatch_core::actions::ActionOutcome::Ok(_)) {
-                        c.paced.insert(pid);
+                for t in to_pause {
+                    if do_pause(&t) {
+                        c.paced.insert(t);
                     }
                 }
+                // Prune targets whose LOCAL process has exited so the paced count
+                // never sticks on a dead pid. Remote liveness isn't probed per tick
+                // (that's a network round-trip); a remote target is cleared when the
+                // plan stops naming it (auto) or on Release.
+                c.paced
+                    .retain(|t| t.ssh.is_some() || ccwatch_core::actions::alive(t.pid));
                 if c.paced != before {
                     persist_paced(&cruise_paths, &c.paced);
                 }
@@ -491,20 +542,21 @@ fn execute_action(
             cancel_remote(remote_defs, remote, id, snapshot)
         }
         ActionRequest::ApplyPacing => {
-            let pids = snapshot
+            let targets = snapshot
                 .pacing
                 .as_ref()
-                .map(|p| p.pause_pids())
+                .map(|p| p.pause_targets())
                 .unwrap_or_default();
             let mut paused = 0usize;
             let mut c = cruise.lock().unwrap();
-            for pid in pids {
-                if matches!(actions::pause(pid), ActionOutcome::Ok(_)) {
+            for t in targets {
+                if do_pause(&t) {
                     paused += 1;
-                    // Register the pid as Cruise-paced (same as auto mode) so
-                    // it's releasable via SetCruiseMode/Release and survives a
-                    // daemon restart via the startup sweep.
-                    c.paced.insert(pid);
+                    // Register the target as Cruise-paced so it's releasable via
+                    // SetCruiseMode/Release, survives a daemon restart via the
+                    // startup sweep, and — because the non-auto refresher no longer
+                    // resumes — STAYS paused until the user releases it.
+                    c.paced.insert(t);
                 }
             }
             persist_paced(paths, &c.paced);
@@ -518,17 +570,16 @@ fn execute_action(
             c.mode = mode.clone();
             let mut released = 0usize;
             if mode != "auto" {
-                // Release: resume everything Cruise paused. Snapshot the pids
-                // (don't drain) so a failed SIGCONT stays tracked — the
-                // continuous non-auto reconcile in the refresher retries it
-                // (target_pause=[] → to_resume includes everything still paced).
-                let pids: Vec<i32> = c.paced.iter().copied().collect();
-                for pid in pids {
-                    // Same dead-pid escape hatch as the refresher's resume loop:
-                    // a pid whose process has exited would otherwise fail resume
-                    // forever and stay stuck in `paced`.
-                    if matches!(actions::resume(pid), ActionOutcome::Ok(_)) || !actions::alive(pid) {
-                        c.paced.remove(&pid);
+                // Release: resume everything Cruise paused. Best-effort — the
+                // non-auto refresher no longer auto-resumes (so manual Applies are
+                // sticky), so this is the release path. A resume that fails on a
+                // still-live process leaves it tracked (retried on the next Release
+                // or when auto re-engages); a dead process is untracked here so the
+                // count can't stick on it.
+                let targets: Vec<PaceTarget> = c.paced.iter().cloned().collect();
+                for t in targets {
+                    if do_resume(&t) || !do_alive(&t) {
+                        c.paced.remove(&t);
                         released += 1;
                     }
                 }
@@ -681,18 +732,25 @@ mod pacing_tests {
 #[cfg(test)]
 mod cruise_tests {
     use super::{cruise_paced_file, persist_paced, sweep_orphaned_paced};
-    use ccwatch_core::pacer::reconcile_paced;
+    use ccwatch_core::model::PaceTarget;
+    use ccwatch_core::pacer::cruise_plan_actions;
     use ccwatch_core::Paths;
     use std::collections::HashSet;
 
+    fn pt(pid: i32) -> PaceTarget {
+        PaceTarget { pid, ssh: None }
+    }
+
     #[test]
-    fn off_mode_releases_all_by_resuming_every_paced_pid() {
-        // Turning cruise off (or any non-auto mode) is modeled as "plan wants
-        // nothing paused" → reconcile resumes every paced pid.
-        let paced: HashSet<i32> = [11, 12, 13].into_iter().collect();
-        let (to_pause, to_resume) = reconcile_paced(&[], &paced);
+    fn non_auto_keeps_manual_pauses_until_release() {
+        // Sticky Apply: in a non-auto mode the per-tick loop resumes nothing, so a
+        // manual one-click pause survives until an explicit Release. (Regression
+        // guard: previously non-auto was modeled as "plan wants nothing" and the
+        // refresher resumed every paced pid within a tick, undoing Apply.)
+        let paced: HashSet<PaceTarget> = [pt(11), pt(12), pt(13)].into_iter().collect();
+        let (to_pause, to_resume) = cruise_plan_actions(false, &[], &paced);
         assert!(to_pause.is_empty());
-        assert_eq!(to_resume.len(), 3);
+        assert!(to_resume.is_empty(), "non-auto must not auto-resume manual pauses");
     }
 
     #[test]
@@ -702,15 +760,22 @@ mod cruise_tests {
         let paths = Paths::new(&root);
         std::fs::create_dir_all(paths.ccwatch_dir()).unwrap();
 
-        let paced: HashSet<i32> = [101, 202, 303].into_iter().collect();
+        // A mix of local and remote targets must round-trip intact.
+        let paced: HashSet<PaceTarget> = [
+            pt(101),
+            pt(202),
+            PaceTarget { pid: 303, ssh: Some("u@h".into()) },
+        ]
+        .into_iter()
+        .collect();
         persist_paced(&paths, &paced);
 
         let text = std::fs::read_to_string(cruise_paced_file(&paths)).unwrap();
-        let back: HashSet<i32> = serde_json::from_str::<Vec<i32>>(&text)
+        let back: HashSet<PaceTarget> = serde_json::from_str::<Vec<PaceTarget>>(&text)
             .unwrap()
             .into_iter()
             .collect();
-        assert_eq!(back, paced, "persisted paced set must round-trip");
+        assert_eq!(back, paced, "persisted paced set must round-trip (incl. ssh host)");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -728,7 +793,9 @@ mod cruise_tests {
 
         // With dead/never-existed pids, resume() fails so none are counted, and
         // the file is cleared to an empty array regardless.
-        persist_paced(&paths, &[2_000_000_001, 2_000_000_002].into_iter().collect());
+        let bogus: HashSet<PaceTarget> =
+            [pt(2_000_000_001), pt(2_000_000_002)].into_iter().collect();
+        persist_paced(&paths, &bogus);
         let _ = sweep_orphaned_paced(&paths); // resume of bogus pids fails → 0-ish
         let after = std::fs::read_to_string(cruise_paced_file(&paths)).unwrap();
         assert_eq!(after.trim(), "[]", "sweep must clear the file");

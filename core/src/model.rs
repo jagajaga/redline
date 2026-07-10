@@ -110,13 +110,35 @@ pub enum Priority {
     Background,
 }
 
+/// Identifies a process Cruise can actuate. `ssh: None` is a local pid (acted on
+/// with `kill(pid, …)`); `ssh: Some(target)` is a pid on a remote host (acted on
+/// with `ssh <target> kill …`). The host is part of the identity so a remote pid
+/// can never collide with — or be mistaken for — a local pid that reuses the same
+/// number.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PaceTarget {
+    pub pid: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<String>,
+}
+
 /// A Cruise Control action on a session process. Advisory in Step 1 (computed,
-/// not executed).
+/// not executed). `ssh` names the remote host for a Remote session (absent/None =
+/// local); it is how the daemon picks the local vs. `ssh` actuator.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum PaceAction {
-    Pause { pid: i32, reason: String },
-    Resume { pid: i32 },
+    Pause {
+        pid: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ssh: Option<String>,
+        reason: String,
+    },
+    Resume {
+        pid: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ssh: Option<String>,
+    },
 }
 
 /// The pacing plan for one snapshot: the target burn, the current burn, the pace
@@ -139,11 +161,29 @@ pub struct PacingPlan {
 impl PacingPlan {
     /// The pids the plan recommends pausing (Pause actions only). By construction
     /// (see `pacer::plan`) these are always Background sessions — never foreground.
+    /// Bare pids for display/counting; use `pause_targets` to actuate (a pid alone
+    /// is ambiguous across hosts).
     pub fn pause_pids(&self) -> Vec<i32> {
         self.actions
             .iter()
             .filter_map(|a| match a {
                 PaceAction::Pause { pid, .. } => Some(*pid),
+                PaceAction::Resume { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The full pause targets (pid + host) the plan recommends. This is what the
+    /// daemon actuates on — carrying the host so a remote pid is paused via `ssh`
+    /// and never as a local `kill`.
+    pub fn pause_targets(&self) -> Vec<PaceTarget> {
+        self.actions
+            .iter()
+            .filter_map(|a| match a {
+                PaceAction::Pause { pid, ssh, .. } => Some(PaceTarget {
+                    pid: *pid,
+                    ssh: ssh.clone(),
+                }),
                 PaceAction::Resume { .. } => None,
             })
             .collect()
@@ -593,14 +633,23 @@ mod tests {
             actual_rate: 0.0,
             price: 0.0,
             actions: vec![
-                PaceAction::Pause { pid: 10, reason: "a".into() },
-                PaceAction::Resume { pid: 20 },
-                PaceAction::Pause { pid: 30, reason: "b".into() },
+                PaceAction::Pause { pid: 10, ssh: None, reason: "a".into() },
+                PaceAction::Resume { pid: 20, ssh: None },
+                PaceAction::Pause { pid: 30, ssh: Some("u@h".into()), reason: "b".into() },
             ],
             reason: String::new(),
             auto: false,
             paced: 0,
         };
         assert_eq!(plan.pause_pids(), vec![10, 30]);
+        // pause_targets carries the host so the daemon actuates a remote pid over
+        // ssh, never as a local kill.
+        assert_eq!(
+            plan.pause_targets(),
+            vec![
+                PaceTarget { pid: 10, ssh: None },
+                PaceTarget { pid: 30, ssh: Some("u@h".into()) },
+            ]
+        );
     }
 }
