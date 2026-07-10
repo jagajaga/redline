@@ -101,6 +101,15 @@ pub enum AgentState {
     Finished,
 }
 
+/// Cruise Control priority tier. `High` is the foreground session — never paced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    High,
+    Normal,
+    Background,
+}
+
 /// A subagent invocation detected from an `Agent`/`Task`/`Workflow` tool call.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Agent {
