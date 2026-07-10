@@ -110,6 +110,26 @@ pub enum Priority {
     Background,
 }
 
+/// A Cruise Control action on a session process. Advisory in Step 1 (computed,
+/// not executed).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PaceAction {
+    Pause { pid: i32, reason: String },
+    Resume { pid: i32 },
+}
+
+/// The pacing plan for one snapshot: the target burn, the current burn, the pace
+/// price, and the actions that would hold burn at target.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PacingPlan {
+    pub target_rate: f64,
+    pub actual_rate: f64,
+    pub price: f64,
+    pub actions: Vec<PaceAction>,
+    pub reason: String,
+}
+
 /// A subagent invocation detected from an `Agent`/`Task`/`Workflow` tool call.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Agent {
@@ -380,6 +400,23 @@ pub struct Session {
     /// they came from, so a client can target it for cancel. `None` for local.
     #[serde(default)]
     pub remote_name: Option<String>,
+}
+
+impl Session {
+    #[cfg(test)]
+    pub fn default_for_test() -> Session {
+        // All zero/empty; tests set only the fields they assert on.
+        serde_json::from_str(
+            r#"{"id":"","name":"","title":null,"cwd":"","pid":null,"kind":"interactive",
+                "entrypoint":"","version":"","model":null,"host":{"kind":"local"},
+                "state":"idle","started_at":null,"last_activity":null,
+                "tokens":{"input":0,"output":0,"cache_write":0,"cache_read":0,
+                          "web_search":0,"web_fetch":0,"messages":0},
+                "tokens_per_min":0.0,"cpu_pct":0.0,"rss_mb":0,"agents":[],"tasks":[],
+                "watchers":[],"activity":[],"processes":[]}"#,
+        )
+        .expect("valid test session")
+    }
 }
 
 /// Aggregate figures for the top bar.

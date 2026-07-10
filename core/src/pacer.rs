@@ -3,7 +3,7 @@
 //! fleet's burn and shares the budget fairly at once (Kelly NUM / dual mirror
 //! descent); an AIMD overlay handles the 429 shock. No enforcement here.
 
-use crate::model::Priority;
+use crate::model::{Agent, PaceAction, PacingPlan, Priority, Session, Snapshot};
 
 /// Interactive entrypoints. A session on one of these, with a recent user turn,
 /// is the foreground and is exempt.
@@ -86,6 +86,161 @@ pub fn allowed_burn(weight: f64, price: f64) -> f64 {
 /// obeys the same bound as `update_price` (its result becomes the new `λ`).
 pub fn aimd_on_429(price: f64, cut: f64) -> f64 {
     (price.max(AIMD_FLOOR) * cut).min(MAX_PRICE)
+}
+
+/// A Background session considered for pausing.
+struct Candidate {
+    pid: i32,
+    label: String,
+    burn: f64,
+    is_fleet: bool,
+}
+
+/// `(true, "fleet <name> (N agents)")` if the session's live work is a Workflow
+/// (a `Workflow` node with children); else `(false, "session <name>")`. Lets the
+/// planner prefer fleet-sessions and label every action the way the user thinks.
+fn fleet_label(s: &Session) -> (bool, String) {
+    for a in &s.agents {
+        if a.subagent_type == "Workflow" && !a.children.is_empty() {
+            let n = count_agents(&a.children);
+            let name = if a.description.is_empty() { "workflow" } else { a.description.as_str() };
+            return (true, format!("fleet {name} ({n} agents)"));
+        }
+    }
+    (false, format!("session {}", s.name))
+}
+
+fn count_agents(ags: &[Agent]) -> usize {
+    ags.iter().map(|a| 1 + count_agents(&a.children)).sum()
+}
+
+/// Threaded controller state: just the scalar pace price.
+#[derive(Clone, Copy, Debug)]
+pub struct PacerState {
+    pub price: f64,
+}
+
+/// Runtime knobs for the pacer (parsed from `[cruise]` config in Task 6).
+#[derive(Clone, Copy, Debug)]
+pub struct PacerConfig {
+    pub reserve: u64,
+    pub deadline_ms: Option<i64>,
+    pub eta: f64,
+    pub aimd_cut: f64,
+    pub idle_secs: i64,
+    pub dead_band: f64,
+}
+
+impl Default for PacerConfig {
+    fn default() -> Self {
+        PacerConfig {
+            reserve: 0,
+            deadline_ms: None,
+            eta: 0.05, // dimensionless mirror-descent step (see Task 3)
+            aimd_cut: 4.0,
+            idle_secs: 120,
+            dead_band: 0.1,
+        }
+    }
+}
+
+/// Compute the pacing plan for one snapshot. Pure: `now_ms` and `saw_429` are
+/// inputs, `prev` carries the price forward. Emits pause actions on Background
+/// sessions whose burn exceeds their price-set share, ordered by the biggest
+/// overage first, until projected burn ≤ target. Foreground is never touched.
+pub fn plan(
+    snap: &Snapshot,
+    cfg: &PacerConfig,
+    prev: PacerState,
+    now_ms: i64,
+    saw_429: bool,
+) -> (PacingPlan, PacerState) {
+    let Some(g) = &snap.governor else {
+        return (
+            PacingPlan {
+                target_rate: 0.0,
+                actual_rate: 0.0,
+                price: prev.price,
+                actions: vec![],
+                reason: "no governor data".into(),
+            },
+            prev,
+        );
+    };
+    let (tank, _is_week) = g.binding();
+    let remaining = tank
+        .budget
+        .map(|b| b.saturating_sub(tank.used))
+        .unwrap_or(0);
+    let deadline = cfg.deadline_ms.or(tank.resets_at);
+    let mins = deadline.map(|d| (d - now_ms) as f64 / 60_000.0).unwrap_or(0.0);
+    let target = target_rate(remaining, cfg.reserve, mins);
+    let actual = tank.rate_per_min;
+
+    // Update the price: AIMD brake on a fresh 429, else dual gradient ascent.
+    let price = if saw_429 {
+        aimd_on_429(prev.price, cfg.aimd_cut)
+    } else {
+        update_price(prev.price, actual, target, cfg.eta)
+    };
+
+    // Candidate throttle units = Background sessions with a live pid. Each knows
+    // whether it's a fleet (its live work is a Workflow) and carries a human label
+    // so fleet-sessions pause first and every action reads as the fleet.
+    let mut candidates: Vec<Candidate> = snap
+        .sessions
+        .iter()
+        .filter(|s| {
+            priority_of(&s.entrypoint, s.last_activity, now_ms, cfg.idle_secs)
+                == Priority::Background
+        })
+        .filter_map(|s| {
+            let pid = s.pid?;
+            let (is_fleet, label) = fleet_label(s);
+            Some(Candidate { pid, label, burn: s.tokens_per_min, is_fleet })
+        })
+        .collect();
+
+    // Pause fleet-sessions first, then the biggest burners, until projected burn
+    // ≤ target — but only when over target by more than the dead-band (anti-flap).
+    let mut actions = Vec::new();
+    if target > 0.0 && actual > target * (1.0 + cfg.dead_band) {
+        candidates.sort_by(|a, b| {
+            b.is_fleet
+                .cmp(&a.is_fleet)
+                .then(b.burn.partial_cmp(&a.burn).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        // NOTE: gating each candidate on `c.burn > allowed_burn(1.0, price)` (as
+        // originally sketched) is a no-op on a cold/early tick: the mirror-descent
+        // price starts at MIN_PRICE and only takes a small multiplicative step per
+        // call (see `loop_converges_at_any_scale`, which needs ~3000 iterations to
+        // converge), so `allowed_burn` is still astronomically larger than any real
+        // burn rate and nothing would ever get paused on the first few ticks even
+        // though we're already far over target. The dead-band check above already
+        // decided we're substantially over target, so just pause fleet-first,
+        // biggest-burner-next, until the projected burn is back at or under target.
+        let mut projected = actual;
+        for c in candidates {
+            if projected <= target {
+                break;
+            }
+            actions.push(PaceAction::Pause {
+                pid: c.pid,
+                reason: format!("pause {}: {:.0}/min over pace share", c.label, c.burn),
+            });
+            projected -= c.burn;
+        }
+    }
+
+    let reason = if actions.is_empty() {
+        format!("coasting: {actual:.0} ≤ target {target:.0}/min")
+    } else {
+        format!("{} over target → pausing {} background session(s)", actual as u64, actions.len())
+    };
+    (
+        PacingPlan { target_rate: target, actual_rate: actual, price, actions, reason },
+        PacerState { price },
+    )
 }
 
 #[cfg(test)]
@@ -196,5 +351,92 @@ mod tests {
         assert!(aimd_on_429(0.0, 4.0) > 0.0, "must brake even from price 0");
         // Respects the same ceiling as update_price (no runaway past MAX_PRICE).
         assert!(aimd_on_429(1e9, 4.0) <= 1e9, "AIMD stays within MAX_PRICE");
+    }
+
+    use crate::model::{
+        GovernorStatus, PaceAction, Session, Snapshot, Tank, BudgetSource,
+    };
+
+    fn tank_over_target(now: i64) -> Tank {
+        // 100M budget, 90M used, resets in 100 min → 10M remaining / 100 = 100k/min
+        // target. Rate 500k/min → well over target, price should rise.
+        Tank {
+            used: 90_000_000,
+            budget: Some(100_000_000),
+            budget_source: BudgetSource::Reported,
+            window_start: now - 60 * 60_000,
+            resets_at: Some(now + 100 * 60_000),
+            rate_per_min: 500_000.0,
+            cruise_per_min: Some(100_000.0),
+            delta: Some(5.0),
+            range_min: Some(20.0),
+            wall_at: Some(now + 20 * 60_000),
+        }
+    }
+
+    fn sess(name: &str, pid: i32, entry: &str, last_user_ms: i64, tpm: f64) -> Session {
+        let mut s = Session::default_for_test(); // helper added below
+        s.name = name.into();
+        s.pid = Some(pid);
+        s.entrypoint = entry.into();
+        s.last_activity = Some(last_user_ms);
+        s.tokens_per_min = tpm;
+        s
+    }
+
+    fn fleet_sess(name: &str, pid: i32, wf_name: &str, n: usize, now: i64, tpm: f64) -> Session {
+        let mut s = sess(name, pid, "workflow", now - 5_000, tpm);
+        // One `Workflow` node with `n` child agents. If `Agent`'s fields differ,
+        // the serde error names the mismatch — adjust the JSON to match.
+        let child = serde_json::json!({
+            "id":"wf/a","subagent_type":"workflow-subagent","description":"",
+            "model":null,"state":"running","started_at":null,
+            "tokens":{"input":0,"output":0,"cache_write":0,"cache_read":0,
+                      "web_search":0,"web_fetch":0,"messages":0},
+            "tokens_per_min":0.0,"activity":[],"last_activity":null,"children":[]
+        });
+        let node = serde_json::json!({
+            "id":"wf_x","subagent_type":"Workflow","description":wf_name,"model":null,
+            "state":"running","started_at":null,
+            "tokens":{"input":0,"output":0,"cache_write":0,"cache_read":0,
+                      "web_search":0,"web_fetch":0,"messages":0},
+            "tokens_per_min":0.0,"activity":[],"last_activity":null,
+            "children": vec![child; n]
+        });
+        s.agents = vec![serde_json::from_value(node).expect("valid test agent")];
+        s
+    }
+
+    #[test]
+    fn plan_paces_background_fleet_first_and_never_foreground() {
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        snap.sessions = vec![
+            sess("foreground", 10, "claude-vscode", now - 5_000, 200_000.0),
+            sess("loopA", 20, "loop", now - 5_000, 300_000.0),          // biggest burner
+            fleet_sess("workflowB", 30, "score_v3", 52, now, 100_000.0), // smaller, but a fleet
+        ];
+        let (planr, state) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
+
+        assert!(state.price > 0.0, "price should rise when over target");
+        assert!(planr.target_rate > 0.0);
+        assert!(!planr.actions.is_empty(), "expected pacing actions");
+
+        // Foreground (pid 10) is never paused.
+        for a in &planr.actions {
+            if let PaceAction::Pause { pid, .. } = a {
+                assert_ne!(*pid, 10, "must never pause the foreground session");
+            }
+        }
+        // The fleet is paused FIRST (before the bigger non-fleet burner) and its
+        // action is labeled as the fleet with its agent count.
+        match &planr.actions[0] {
+            PaceAction::Pause { pid, reason } => {
+                assert_eq!(*pid, 30, "fleet-session paused first, even though it burns less");
+                assert!(reason.contains("fleet score_v3 (52 agents)"), "reason: {reason}");
+            }
+            _ => panic!("first action should be a Pause"),
+        }
     }
 }
