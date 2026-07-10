@@ -13,8 +13,8 @@ const BURN_RED: f64 = 40_000.0;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    let alert_h =
-        ((app.snapshot.alerts.len() + governor_estimated(app) as usize) as u16).clamp(1, 5) + 2;
+    let extra = governor_estimated(app) as usize + pacing_advisory(app).is_some() as usize;
+    let alert_h = ((app.snapshot.alerts.len() + extra) as u16).clamp(1, 6) + 2;
     let chunks = Layout::vertical([
         Constraint::Length(1),        // top bar
         Constraint::Length(alert_h),  // alerts
@@ -79,6 +79,23 @@ fn governor_estimated(app: &App) -> bool {
     let reported =
         |t: &ccwatch_core::model::Tank| t.budget_source == ccwatch_core::model::BudgetSource::Reported;
     !reported(&g.window) && g.week.as_ref().is_none_or(|w| !reported(w))
+}
+
+/// A one-line Cruise Control recommendation when the pacing plan proposes pauses.
+/// Advisory only — nothing is executed. `None` when there's no plan or nothing to do.
+fn pacing_advisory(app: &App) -> Option<String> {
+    let p = app.snapshot.pacing.as_ref()?;
+    if p.actions.is_empty() {
+        return None;
+    }
+    // Name the first recommended target; summarise the rest as "+N more".
+    let first = p.actions.iter().find_map(|a| match a {
+        ccwatch_core::model::PaceAction::Pause { reason, .. } => Some(reason.clone()),
+        _ => None,
+    })?;
+    let more = p.actions.len().saturating_sub(1);
+    let tail = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+    Some(format!("Cruise · to coast: {first}{tail}"))
 }
 
 fn draw_topbar(f: &mut Frame, area: Rect, app: &App) {
@@ -159,6 +176,12 @@ fn draw_alerts(f: &mut Frame, area: Rect, app: &App) {
                 "install the Usage Bridge browser extension for exact limits — jagajaga.me/redline",
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             ),
+        ])));
+    }
+    if let Some(text) = pacing_advisory(app) {
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("⏸ ", Style::default().fg(Color::Cyan)),
+            Span::styled(text, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         ])));
     }
     items.extend(app.snapshot.alerts.iter().map(|a| ListItem::new(alert_line(a))));
@@ -1000,6 +1023,26 @@ mod tests {
         ] {
             assert!(s.contains(needle), "expected screen to contain {needle:?}\n{s}");
         }
+    }
+
+    #[test]
+    fn renders_cruise_advisory_when_plan_proposes_pauses() {
+        use ccwatch_core::model::{PaceAction, PacingPlan};
+        let mut snap = snapshot(vec![session("s1", "webapp", vec![])]);
+        snap.pacing = Some(PacingPlan {
+            target_rate: 100_000.0,
+            actual_rate: 500_000.0,
+            price: 1.0e-5,
+            actions: vec![PaceAction::Pause {
+                pid: 42,
+                reason: "pause fleet score_v3 (52 agents): 300000/min (value-density 1.0e-5)".into(),
+            }],
+            reason: "500000 over target → pausing 1 background session(s)".into(),
+        });
+        let app = app_with(snap);
+        let s = render(&app);
+        assert!(s.contains("Cruise"), "advisory label missing:\n{s}");
+        assert!(s.contains("fleet score_v3 (52 agents)"), "recommendation missing:\n{s}");
     }
 
     /// Map a ratatui color to a hex string (catppuccin-ish palette), given the
