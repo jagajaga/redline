@@ -43,21 +43,27 @@ pub fn target_rate(remaining: u64, reserve: u64, mins_to_deadline: f64) -> f64 {
 /// exact zero, so λ is floored here; `1 / MIN_PRICE` is the effective "unbounded"
 /// burn when the budget isn't binding.
 const MIN_PRICE: f64 = 1e-9;
+/// Ceiling on λ. At this price `allowed_burn = weight / 1e9 ≈ 0` (throttle
+/// everything), but it is *finite and recoverable*: near budget exhaustion the
+/// relative error explodes and `exp()` can overflow, so without a ceiling λ would
+/// latch at `+∞` and deadlock a unit at zero burn even after the budget recovers.
+/// `inf.clamp(_, MAX_PRICE) == MAX_PRICE`, so the overflow is caught here.
+const MAX_PRICE: f64 = 1e9;
 
 /// Dual **mirror descent** on the budget constraint (Balseiro et al.): the pace
 /// price `λ` moves *multiplicatively* by the **relative** pace error, so one
 /// dimensionless step size `eta` (~0.05) is stable across tank scales — a plain
 /// additive `λ + η·(burn − target)` would need `η < 2/target²`, i.e. a different
-/// η per tank. Over target → λ grows → allowed burn shrinks, and vice-versa. λ
-/// stays positive by construction.
+/// η per tank. Over target → λ grows → allowed burn shrinks, and vice-versa. λ is
+/// kept in `[MIN_PRICE, MAX_PRICE]` so it stays positive and can never overflow.
 pub fn update_price(prev: f64, actual_burn: f64, target_rate: f64, eta: f64) -> f64 {
-    let base = prev.max(MIN_PRICE);
+    let base = prev.clamp(MIN_PRICE, MAX_PRICE);
     if target_rate <= 0.0 {
         // No spendable budget → drive the price up hard (throttle everything).
-        return base * eta.exp();
+        return (base * eta.exp()).clamp(MIN_PRICE, MAX_PRICE);
     }
     let rel_err = (actual_burn - target_rate) / target_rate;
-    (base * (eta * rel_err).exp()).max(MIN_PRICE)
+    (base * (eta * rel_err).exp()).clamp(MIN_PRICE, MAX_PRICE)
 }
 
 /// A unit's allowed burn under the current price: `weight / λ`. Higher price
@@ -153,5 +159,21 @@ mod tests {
             }
             assert!((burn - target).abs() / target < 0.05, "target {target}: burn {burn}");
         }
+    }
+
+    #[test]
+    fn price_is_bounded_and_recovers_near_exhaustion() {
+        // Near budget exhaustion target_rate → ~0 while burn is normal: the
+        // relative error explodes and exp() would overflow. λ must stay finite
+        // (≤ MAX_PRICE), not latch at +∞.
+        let stuck = update_price(1.0, 600_000.0, 0.001, 0.05);
+        assert!(stuck.is_finite() && stuck <= 1e9, "price bounded, got {stuck}");
+        // And once healthy under-target readings arrive, λ comes back down off the
+        // ceiling (allowed burn rises again) — the deadlock is recoverable.
+        let mut p = 1e9;
+        for _ in 0..500 {
+            p = update_price(p, 0.0, 600_000.0, 0.05);
+        }
+        assert!(p < 1.0, "price recovers off the ceiling, got {p}");
     }
 }
