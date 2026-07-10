@@ -242,4 +242,11 @@ final class Store: ObservableObject {
     nonisolated func setCruiseMode(_ mode: String) {
         client.sendAction(["msg": "action", "action": "set_cruise_mode", "mode": mode])
     }
+    /// Pin a session's Cruise priority: "high" | "low" | "normal" (clears it).
+    nonisolated func setSessionPriority(_ sessionId: String, _ priority: String) {
+        client.sendAction([
+            "msg": "action", "action": "set_session_priority",
+            "session_id": sessionId, "priority": priority,
+        ])
+    }
 }

@@ -306,6 +306,15 @@ struct SessionCard: View {
                     Button("Kill") { store.killSession(pid: pid) }
                     Button("Pause") { store.pauseSession(pid: pid) }
                     Button("Resume") { store.resumeSession(pid: pid) }
+                    Spacer()
+                    // Cruise priority pin. Default (no override) = Normal: Cruise
+                    // decides. High = never pause; Low = shed first.
+                    Menu(cruiseLabel(s)) {
+                        Button("High · never pause") { store.setSessionPriority(s.id, "high") }
+                        Button("Normal · Cruise decides") { store.setSessionPriority(s.id, "normal") }
+                        Button("Low · shed first") { store.setSessionPriority(s.id, "low") }
+                    }
+                    .menuStyle(.borderlessButton).fixedSize()
                 }
                 .buttonStyle(.borderless).font(.caption2).foregroundStyle(Palette.teal)
                 .padding(.top, 1)
@@ -313,6 +322,15 @@ struct SessionCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12).padding(.vertical, 7)
+    }
+
+    /// The Cruise-priority menu label reflects the current per-session override.
+    private func cruiseLabel(_ s: Session) -> String {
+        switch s.priorityOverride {
+        case "high": return "⇧ Cruise: High"
+        case "low": return "⇩ Cruise: Low"
+        default: return "Cruise: auto"
+        }
     }
 
     // MARK: - Expanded detail

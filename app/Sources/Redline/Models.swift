@@ -78,6 +78,10 @@ struct Session: Decodable, Identifiable {
     var state: String = "idle"
     var startedAt: Int64?
     var lastActivity: Int64?
+    var lastUserTurn: Int64?
+    /// User's Cruise priority override: "high" (never pause) | "low" (shed first) |
+    /// nil (auto — Cruise decides).
+    var priorityOverride: String?
     var tokens: Ledger = Ledger()
     var tokensPerMin: Double = 0
     var cpuPct: Double = 0
