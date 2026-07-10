@@ -11,6 +11,7 @@ struct Snapshot: Decodable {
     var totals: Totals = Totals()
     var modelMix: [MixEntry] = []
     var governor: GovernorStatus?
+    var pacing: PacingPlan?
 }
 
 struct Totals: Decodable {
@@ -23,6 +24,20 @@ struct Totals: Decodable {
 struct GovernorStatus: Decodable {
     var window: Tank
     var week: Tank?
+}
+
+struct PaceAction: Decodable {
+    var op: String = ""
+    var pid: Int?
+    var reason: String?
+}
+
+struct PacingPlan: Decodable {
+    var targetRate: Double = 0
+    var actualRate: Double = 0
+    var price: Double = 0
+    var actions: [PaceAction] = []
+    var reason: String = ""
 }
 
 struct Tank: Decodable {
