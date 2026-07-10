@@ -168,10 +168,10 @@ impl Default for PacerConfig {
 
 /// Compute the pacing plan for one snapshot. Pure: `now_ms` and `saw_429` are
 /// inputs. Selection is a greedy **value-density knapsack** for our discrete
-/// whole-session actuator: pause the lowest value-density (`weight / burn`)
-/// Background sessions first until projected burn ≤ target — so fleets (worth
-/// least per token) shed before other work, and the reported price `λ` is the
-/// value-density at the cut. Foreground is never touched. (The mirror-descent
+/// whole-session actuator: fleets are a strict harm-tier that always sheds before
+/// non-fleet Background, and within a tier the lowest value-density (`weight /
+/// burn`) pauses first, until projected burn ≤ target. The reported price `λ` is
+/// the value-density at the cut. Foreground is never touched. (The mirror-descent
 /// primitives `update_price` / `aimd_on_429` provide the smooth continuous price
 /// for a future finer-grained actuator; the discrete knapsack here is exact and
 /// immediate.)
@@ -227,14 +227,21 @@ pub fn plan(
         })
         .collect();
 
-    // Greedy value-density knapsack: pause the lowest-density work first until the
-    // projected burn is back at/under target — but only when over by more than the
-    // dead-band (anti-flap). `price` = the value-density at the cut (λ).
+    // Greedy value-density knapsack, tiered: fleets are a strict harm-tier and
+    // always shed before non-fleet Background (pausing autonomous, unwatched work
+    // is low-harm — a barely-burning fleet still goes before a heavy loop). Within
+    // a tier, pause the lowest value-density (`weight/burn`) first. Only act when
+    // over target by more than the dead-band (anti-flap). `price` = the
+    // value-density at the cut (λ).
+    let over = target > 0.0 && actual > target * (1.0 + cfg.dead_band);
     let mut actions = Vec::new();
     let mut price = 0.0;
-    if target > 0.0 && actual > target * (1.0 + cfg.dead_band) {
-        candidates
-            .sort_by(|a, b| density(a).partial_cmp(&density(b)).unwrap_or(std::cmp::Ordering::Equal));
+    if over {
+        candidates.sort_by(|a, b| {
+            b.is_fleet
+                .cmp(&a.is_fleet) // fleets (true) before non-fleets
+                .then(density(a).partial_cmp(&density(b)).unwrap_or(std::cmp::Ordering::Equal))
+        });
         let mut projected = actual;
         for c in &candidates {
             if projected <= target {
@@ -250,8 +257,13 @@ pub fn plan(
         }
     }
 
-    let reason = if actions.is_empty() {
+    // Distinguish "coasting" from "over target but nothing we may pause" — the
+    // latter is a real state (only the exempt foreground is left) and must not be
+    // reported as coasting.
+    let reason = if !over {
         format!("coasting: {actual:.0} ≤ target {target:.0}/min")
+    } else if actions.is_empty() {
+        format!("over target ({actual:.0} > {target:.0}/min) — no background sessions to pause")
     } else {
         format!("{} over target → pausing {} background session(s)", actual as u64, actions.len())
     };
@@ -456,5 +468,24 @@ mod tests {
             }
             _ => panic!("first action should be a Pause"),
         }
+    }
+
+    #[test]
+    fn a_low_burn_fleet_still_pauses_before_a_bigger_non_fleet() {
+        // Fleets are a strict harm-tier: even a barely-burning fleet is shed
+        // before a heavier non-fleet loop — value-density alone would (wrongly)
+        // pause the loop first, so this guards the tiering.
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        snap.sessions = vec![
+            fleet_sess("fleetX", 40, "wf", 3, now, 10_000.0),   // tiny burn, but a fleet
+            sess("loopBig", 50, "loop", now - 5_000, 50_000.0), // heavier non-fleet
+        ];
+        let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
+        assert!(
+            matches!(&planr.actions[0], PaceAction::Pause { pid, .. } if *pid == 40),
+            "the low-burn fleet must pause before the bigger non-fleet loop"
+        );
     }
 }
