@@ -39,16 +39,30 @@ pub fn target_rate(remaining: u64, reserve: u64, mins_to_deadline: f64) -> f64 {
     spendable / mins_to_deadline
 }
 
-/// Dual gradient ascent on the budget constraint: the pace price `λ` rises when
-/// burn is over target and falls when under. `eta` is the step size. Clamped at
-/// zero (a non-binding budget has price 0). This is the whole pacing loop.
+/// Smallest price we allow. A multiplicative update can't climb back from an
+/// exact zero, so λ is floored here; `1 / MIN_PRICE` is the effective "unbounded"
+/// burn when the budget isn't binding.
+const MIN_PRICE: f64 = 1e-9;
+
+/// Dual **mirror descent** on the budget constraint (Balseiro et al.): the pace
+/// price `λ` moves *multiplicatively* by the **relative** pace error, so one
+/// dimensionless step size `eta` (~0.05) is stable across tank scales — a plain
+/// additive `λ + η·(burn − target)` would need `η < 2/target²`, i.e. a different
+/// η per tank. Over target → λ grows → allowed burn shrinks, and vice-versa. λ
+/// stays positive by construction.
 pub fn update_price(prev: f64, actual_burn: f64, target_rate: f64, eta: f64) -> f64 {
-    (prev + eta * (actual_burn - target_rate)).max(0.0)
+    let base = prev.max(MIN_PRICE);
+    if target_rate <= 0.0 {
+        // No spendable budget → drive the price up hard (throttle everything).
+        return base * eta.exp();
+    }
+    let rel_err = (actual_burn - target_rate) / target_rate;
+    (base * (eta * rel_err).exp()).max(MIN_PRICE)
 }
 
 /// A unit's allowed burn under the current price: `weight / λ`. Higher price
-/// throttles everyone; higher weight (priority) buys a bigger share. Price 0
-/// means the budget isn't binding → unbounded (represented as f64::INFINITY).
+/// throttles everyone; higher weight (priority) buys a bigger share. A
+/// non-positive price means the budget isn't binding → unbounded.
 pub fn allowed_burn(weight: f64, price: f64) -> f64 {
     if price <= 0.0 {
         f64::INFINITY
@@ -104,18 +118,19 @@ mod tests {
 
     #[test]
     fn price_rises_over_target_and_falls_under() {
-        // Over target → price up.
-        let up = update_price(1.0, 800_000.0, 600_000.0, 1e-6);
+        // Multiplicative update on the relative error, dimensionless eta.
+        let up = update_price(1.0, 800_000.0, 600_000.0, 0.05);
         assert!(up > 1.0, "over target should raise price, got {up}");
-        // Under target → price down.
-        let down = update_price(1.0, 400_000.0, 600_000.0, 1e-6);
+        let down = update_price(1.0, 400_000.0, 600_000.0, 0.05);
         assert!(down < 1.0, "under target should lower price, got {down}");
     }
 
     #[test]
-    fn price_never_negative() {
-        // Massively under target must clamp at 0, not go negative.
-        assert_eq!(update_price(0.0, 0.0, 600_000.0, 1e-3), 0.0);
+    fn price_stays_positive_and_finite() {
+        // Massively under target must not collapse to zero (a multiplicative
+        // update can't recover from 0) nor go negative.
+        let p = update_price(0.0, 0.0, 600_000.0, 0.05);
+        assert!(p > 0.0 && p.is_finite(), "price stays positive+finite, got {p}");
     }
 
     #[test]
@@ -125,17 +140,18 @@ mod tests {
     }
 
     #[test]
-    fn loop_converges_to_target() {
-        // Simulate: each tick, everyone burns their allowed share; price should
-        // drive total burn toward target. One unit, weight 1.
-        let target = 600_000.0;
-        let mut price = 1e-6;
-        let eta = 1e-12;
-        let mut burn = 2_000_000.0; // start way over
-        for _ in 0..2000 {
-            price = update_price(price, burn, target, eta);
-            burn = allowed_burn(1.0, price); // the unit obeys its permit
+    fn loop_converges_at_any_scale() {
+        // One unit obeys its price-share each tick; the price drives burn to the
+        // target. The SAME dimensionless eta works whether the target is small or
+        // large — the whole point of the multiplicative (mirror-descent) form.
+        for &target in &[600_000.0_f64, 6_000_000.0] {
+            let mut price = 1e-8;
+            let mut burn = allowed_burn(1.0, price);
+            for _ in 0..3000 {
+                price = update_price(price, burn, target, 0.05);
+                burn = allowed_burn(1.0, price);
+            }
+            assert!((burn - target).abs() / target < 0.05, "target {target}: burn {burn}");
         }
-        assert!((burn - target).abs() / target < 0.05, "converged near target: {burn}");
     }
 }
