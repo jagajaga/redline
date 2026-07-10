@@ -29,6 +29,8 @@ struct GovernorStatus: Decodable {
 struct PaceAction: Decodable {
     var op: String = ""
     var pid: Int?
+    /// Remote host (`user@host`) for a Remote session, paused over SSH; nil = local.
+    var ssh: String?
     var reason: String?
 }
 
