@@ -427,6 +427,20 @@ impl App {
         self.mode = Mode::Confirm(PendingAction { request, prompt });
     }
 
+    /// Stage the Cruise Control recommendation (pause its background sessions)
+    /// for confirmation, if there's a plan with something to pause.
+    pub fn stage_apply_pacing(&mut self) {
+        if let Some(p) = self.snapshot.pacing.as_ref() {
+            let n = p.pause_pids().len();
+            if n > 0 {
+                self.mode = Mode::Confirm(PendingAction {
+                    request: ActionRequest::ApplyPacing,
+                    prompt: format!("Pause {n} background session(s) to coast?"),
+                });
+            }
+        }
+    }
+
     /// Take the staged request (on confirm).
     pub fn take_pending(&mut self) -> Option<ActionRequest> {
         if let Mode::Confirm(p) = &self.mode {
@@ -684,6 +698,28 @@ mod tests {
         match app.take_pending() {
             Some(ccwatch_core::ipc::ActionRequest::KillSession { pid }) => assert_eq!(pid, 4242),
             other => panic!("expected KillSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_cruise_key_stages_apply_pacing_confirm() {
+        use ccwatch_core::model::{PaceAction, PacingPlan};
+        let mut snap = snapshot(vec![session("s1", "webapp", vec![])]);
+        snap.pacing = Some(PacingPlan {
+            target_rate: 100_000.0,
+            actual_rate: 500_000.0,
+            price: 1e-5,
+            actions: vec![PaceAction::Pause {
+                pid: 7,
+                reason: "x".into(),
+            }],
+            reason: "over".into(),
+        });
+        let mut app = app_with(snap);
+        app.stage_apply_pacing();
+        match app.take_pending() {
+            Some(ccwatch_core::ipc::ActionRequest::ApplyPacing) => {}
+            other => panic!("expected ApplyPacing confirm, got {other:?}"),
         }
     }
 

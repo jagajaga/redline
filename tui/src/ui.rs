@@ -762,7 +762,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Mode::Confirm(_) => " y confirm · n/esc cancel ",
         Mode::Details => " esc/d close ",
         Mode::Normal => {
-            " / jump · ↑↓ · enter expand · d details · s sort · x hide-done · f hide-idle · k kill · p pause · r resume · q quit "
+            " / jump · ↑↓ · enter expand · d details · s sort · x hide-done · f hide-idle · k kill · p pause · r resume · C cruise · q quit "
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::Black).bg(Color::Gray))];
