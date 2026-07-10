@@ -47,6 +47,16 @@ pub struct Config {
     pub weight_default: f64,
     /// Terminal app for "Open TUI dashboard" (empty → auto-detect).
     pub terminal_app: String,
+    /// Cruise Control mode: "off" | "advisory" | "oneclick" | "auto".
+    pub cruise_mode: String,
+    /// Tokens reserved (not spent by the pacer) out of the plan-window budget.
+    pub cruise_reserve: u64,
+    /// Dimensionless mirror-descent step for the pacer (see Task 3).
+    pub cruise_eta: f64,
+    /// AIMD multiplicative-cut factor applied on overspend.
+    pub cruise_aimd_cut: f64,
+    /// Dead-band around the target rate where the pacer holds steady.
+    pub cruise_dead_band: f64,
 }
 
 /// Which weight/cost tier a model string belongs to. Substring match on the
@@ -94,6 +104,11 @@ impl Default for Config {
             weight_fable: 2.0,
             weight_default: 1.0,
             terminal_app: String::new(),
+            cruise_mode: "off".to_string(),
+            cruise_reserve: 0,
+            cruise_eta: 0.05,
+            cruise_aimd_cut: 4.0,
+            cruise_dead_band: 0.1,
         }
     }
 }
@@ -124,13 +139,40 @@ impl Config {
 }
 
 impl Config {
+    /// Build the pacer's runtime config from these settings.
+    pub fn pacer_config(&self) -> crate::pacer::PacerConfig {
+        crate::pacer::PacerConfig {
+            reserve: self.cruise_reserve,
+            deadline_ms: None,
+            eta: self.cruise_eta,
+            aimd_cut: self.cruise_aimd_cut,
+            idle_secs: self.idle_secs,
+            dead_band: self.cruise_dead_band,
+        }
+    }
+}
+
+impl Config {
     /// Load overrides from a `key = value` TOML-ish file, falling back to
     /// defaults for anything absent or unparseable. Missing file → defaults.
     pub fn load(path: &Path) -> Config {
-        let mut cfg = Config::default();
         let Ok(text) = std::fs::read_to_string(path) else {
-            return cfg;
+            return Config::default();
         };
+        Config::parse_str(&text)
+    }
+
+    /// Test-only helper: parse config text directly, without going through a
+    /// file on disk. Mirrors [`Config::load`]'s parsing.
+    #[cfg(test)]
+    fn parse_for_test(text: &str) -> Config {
+        Config::parse_str(text)
+    }
+
+    /// Parse overrides from `key = value` TOML-ish text, falling back to
+    /// defaults for anything absent or unparseable.
+    fn parse_str(text: &str) -> Config {
+        let mut cfg = Config::default();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
@@ -173,6 +215,11 @@ impl Config {
                 "weight_fable" => set_f64(&mut cfg.weight_fable, v),
                 "weight_default" => set_f64(&mut cfg.weight_default, v),
                 "terminal_app" | "terminal" => cfg.terminal_app = v.to_string(),
+                "cruise_mode" => cfg.cruise_mode = v.to_string(),
+                "cruise_reserve" => set_u64(&mut cfg.cruise_reserve, v),
+                "cruise_eta" => set_f64(&mut cfg.cruise_eta, v),
+                "cruise_aimd_cut" => set_f64(&mut cfg.cruise_aimd_cut, v),
+                "cruise_dead_band" => set_f64(&mut cfg.cruise_dead_band, v),
                 _ => {}
             }
         }
@@ -190,6 +237,13 @@ fn set_usize(target: &mut usize, v: &str) {
         *target = n;
     }
 }
+fn set_u64(target: &mut u64, v: &str) {
+    // Mirrors the `_`-separator handling used for the other u64 fields
+    // (`governor_window_budget` / `governor_week_budget` above).
+    if let Ok(n) = v.replace('_', "").parse() {
+        *target = n;
+    }
+}
 fn set_f64(target: &mut f64, v: &str) {
     if let Ok(n) = v.parse() {
         *target = n;
@@ -199,6 +253,21 @@ fn set_f64(target: &mut f64, v: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_cruise_block() {
+        let toml = "\
+cruise_mode = \"advisory\"  # off|advisory|oneclick|auto
+cruise_reserve = 20_000_000
+cruise_eta = 0.000001
+";
+        let c = Config::parse_for_test(toml); // helper mirrored from existing tests
+        assert_eq!(c.cruise_mode, "advisory");
+        assert_eq!(c.cruise_reserve, 20_000_000);
+        assert!((c.cruise_eta - 1e-6).abs() < 1e-12);
+        // Defaults for unset keys.
+        assert_eq!(c.cruise_aimd_cut, 4.0);
+    }
 
     #[test]
     fn tier_and_weight_match_model_ids() {
