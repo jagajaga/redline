@@ -318,14 +318,15 @@ struct SessionCard: View {
                     Button("Pause") { store.pauseSession(pid: pid) }
                     Button("Resume") { store.resumeSession(pid: pid) }
                     Spacer()
-                    // Cruise priority pin. Default (no override) = Normal: Cruise
-                    // decides. High = never pause; Low = shed first.
-                    Menu(cruiseLabel(s)) {
-                        Button("High · never pause") { store.setSessionPriority(s.id, "high") }
-                        Button("Normal · Cruise decides") { store.setSessionPriority(s.id, "normal") }
-                        Button("Low · shed first") { store.setSessionPriority(s.id, "low") }
+                    // Cruise priority pin — click to cycle: auto → High (never
+                    // pause) → Low (shed first). Deliberately a plain Button, NOT a
+                    // Menu: an AppKit-bridged Menu with .fixedSize() beside a
+                    // Spacer made the popover's layout never converge — the layout
+                    // engine re-measured every display frame and pinned the CPU.
+                    Button(cruiseLabel(s)) {
+                        store.setSessionPriority(s.id, nextCruisePriority(s))
                     }
-                    .menuStyle(.borderlessButton).fixedSize()
+                    .help("Cruise priority — click to cycle: auto → High → Low")
                 }
                 .buttonStyle(.borderless).font(.caption2).foregroundStyle(Palette.teal)
                 .padding(.top, 1)
@@ -335,12 +336,21 @@ struct SessionCard: View {
         .padding(.horizontal, 12).padding(.vertical, 7)
     }
 
-    /// The Cruise-priority menu label reflects the current per-session override.
+    /// The Cruise-priority label reflects the current per-session override.
     private func cruiseLabel(_ s: Session) -> String {
         switch s.priorityOverride {
         case "high": return "⇧ Cruise: High"
         case "low": return "⇩ Cruise: Low"
         default: return "Cruise: auto"
+        }
+    }
+
+    /// Next priority in the click-to-cycle order: auto → High → Low → auto.
+    private func nextCruisePriority(_ s: Session) -> String {
+        switch s.priorityOverride {
+        case "high": return "low"
+        case "low": return "normal" // clears the override → back to auto
+        default: return "high"
         }
     }
 
